@@ -1,0 +1,67 @@
+// Copyright 2025 EURECOM
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Contributors:
+//   Giulio CAROTA
+//   Thomas DU
+//   Adlen KSENTINI
+
+/*
+ * 3gpp-monitoring-event
+ *
+ * API for Monitoring Event.   © 2024, 3GPP Organizational Partners (ARIB, ATIS, CCSA, ETSI, TSDSI, TTA, TTC).   All rights reserved.
+ *
+ * API version: 1.3.0-alpha.5
+ */
+
+package models
+
+import (
+	"errors"
+)
+
+// Snssai - When Snssai needs to be converted to string (e.g. when used in maps as key), the string shall be composed of one to three digits \"sst\" optionally followed by \"-\" and 6 hexadecimal digits \"sd\".
+type Snssai struct {
+
+	// Unsigned integer, within the range 0 to 255, representing the Slice/Service Type.  It indicates the expected Network Slice behaviour in terms of features and services. Values 0 to 127 correspond to the standardized SST range. Values 128 to 255 correspond  to the Operator-specific range. See clause 28.4.2 of 3GPP TS 23.003. Standardized values are defined in clause 5.15.2.2 of 3GPP TS 23.501.
+	Sst int32 `json:"sst"`
+
+	// 3-octet string, representing the Slice Differentiator, in hexadecimal representation. Each character in the string shall take a value of \"0\" to \"9\", \"a\" to \"f\" or \"A\" to \"F\" and shall represent 4 bits. The most significant character representing the 4 most significant bits of the SD shall appear first in the string, and the character representing the 4 least significant bit of the SD shall appear last in the string. This is an optional parameter that complements the Slice/Service type(s) to allow to  differentiate amongst multiple Network Slices of the same Slice/Service type. This IE shall be absent if no SD value is associated with the SST.
+	Sd string `json:"sd,omitempty" validate:"regexp=^[A-Fa-f0-9]{6}$"`
+}
+
+// AssertSnssaiRequired checks if the required fields are not zero-ed
+func AssertSnssaiRequired(obj Snssai) error {
+	elements := map[string]interface{}{
+		"sst": obj.Sst,
+	}
+	for name, el := range elements {
+		if isZero := IsZeroValue(el); isZero {
+			return &RequiredError{Field: name}
+		}
+	}
+
+	return nil
+}
+
+// AssertSnssaiConstraints checks if the values respects the defined constraints
+func AssertSnssaiConstraints(obj Snssai) error {
+	if obj.Sst < 0 {
+		return &ParsingError{Param: "Sst", Err: errors.New(errMsgMinValueConstraint)}
+	}
+	if obj.Sst > 255 {
+		return &ParsingError{Param: "Sst", Err: errors.New(errMsgMaxValueConstraint)}
+	}
+	return nil
+}

@@ -1,0 +1,14 @@
+nbi:
+  httpVersion: 1
+  useTLS: no
+  fqdn: 3gpp-ue-address.local
+  port: 8080
+
+sbi:
+  identitySvc: http://ue-identity-service:8080
+  profileSvc: http://ue-profile-service:8080
+  httpVersion: 1
+
+supportedFeatures: 3fff # 12 for open5gs, 3fff for free5gs
+capifSvc: capif-connector:8080
+

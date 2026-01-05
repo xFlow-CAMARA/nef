@@ -1,0 +1,31 @@
+nbi:
+  httpVersion: 1
+  useTLS: no
+  fqdn: as-session-with-qos
+  port: 8080
+
+sbi:
+  nrfSvc: http://nrf.open5gs.org
+  useNrf: no
+  pcfSvc: http://pcf.open5gs.org
+  httpVersion: 2
+
+capifSvc: http://capif.nef.org
+supportedFeatures: 12 # 12 for open5gs, 3fff for free5gs
+qosConfig:
+  qos1:
+    marBwDl: 120000000
+    marBwUl: 120000000
+    mediaType: CONTROL
+  qos2:
+    marBwDl: 240000000
+    marBwUl: 240000000
+    mediaType: CONTROL
+  qos3:
+    marBwDl: 480000000
+    marBwUl: 480000000
+    mediaType: CONTROL
+  qos4:
+    marBwDl: 960000000
+    marBwUl: 960000000
+    mediaType: VIDEO

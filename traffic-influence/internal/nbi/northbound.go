@@ -1,0 +1,116 @@
+// Copyright 2025 EURECOM
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Contributors:
+//   Giulio CAROTA
+//   Thomas DU
+//   Adlen KSENTINI
+
+package nbi
+
+import (
+	"log"
+	"net/http"
+	"strconv"
+	"sync"
+
+	"github.com/gorilla/mux"
+	libcapif "gitlab.eurecom.fr/open-exposure/nef/libcapif"
+	models "gitlab.eurecom.fr/open-exposure/nef/traffic-influence/internal/models"
+	"gitlab.eurecom.fr/open-exposure/nef/traffic-influence/internal/nbi/service"
+	"gitlab.eurecom.fr/open-exposure/nef/traffic-influence/pkg/config"
+)
+
+type appCtx interface {
+	Cfg() *config.AppConfig
+	Service() *service.Service
+}
+
+type NbiServer struct {
+	appCtx
+	router   *mux.Router
+	capifCtx *libcapif.CapifConnector
+	server   *http.Server
+}
+
+func NewNorthbound(app appCtx) (*NbiServer, error) {
+	nbi := &NbiServer{appCtx: app}
+	IndividualTrafficInfluenceSubscriptionAPIService := NewIndividualTrafficInfluenceSubscriptionAPIService(nbi)
+	IndividualTrafficInfluenceSubscriptionAPIController := NewIndividualTrafficInfluenceSubscriptionAPIController(IndividualTrafficInfluenceSubscriptionAPIService)
+
+	TrafficInfluenceSubscriptionAPIService := NewTrafficInfluenceSubscriptionAPIService(nbi)
+	TrafficInfluenceSubscriptionAPIController := NewTrafficInfluenceSubscriptionAPIController(TrafficInfluenceSubscriptionAPIService)
+
+	nbi.router = models.NewRouter(IndividualTrafficInfluenceSubscriptionAPIController, TrafficInfluenceSubscriptionAPIController)
+
+	if len(nbi.Cfg().CapifSvc) > 0 {
+		nbi.capifCtx = libcapif.NewConnector(nbi.Cfg().CapifSvc)
+		nbi.capifCtx.InstantiateConnector("traffic-influence", "v1", "HTTP_1_1")
+		nbi.router.Use(nbi.capifCtx.CapifMiddleware)
+
+		/*CAPIF Related code */
+		/* Register routes to CAPIF */
+		for rName, route := range IndividualTrafficInfluenceSubscriptionAPIController.Routes() {
+			nbi.capifCtx.AddEndpoint(route.Pattern, "SUBSCRIBE_NOTIFY", []string{route.Method}, rName)
+		}
+		for rName, route := range TrafficInfluenceSubscriptionAPIController.Routes() {
+			nbi.capifCtx.AddEndpoint(route.Pattern, "SUBSCRIBE_NOTIFY", []string{route.Method}, rName)
+		}
+		nbi.capifCtx.AddInterface(nbi.Cfg().Nbi.Fqdn, int32(nbi.Cfg().Nbi.Port))
+	}
+
+	nbi.server = &http.Server{Addr: ":" + strconv.FormatUint(uint64(nbi.Cfg().Nbi.Port), 10), Handler: nbi.router}
+	return nbi, nil
+}
+
+func (n *NbiServer) startListening(wg *sync.WaitGroup) {
+	defer func() {
+		_ = recover()
+		wg.Done()
+	}()
+
+	if n.capifCtx != nil {
+		n.capifCtx.RegisterService()
+	} else {
+		log.Default().Printf("capif svc not defined, disabling feature")
+	}
+
+	log.Printf("nbi http(s) server started")
+	err := n.server.ListenAndServe()
+
+	if err != nil && err != http.ErrServerClosed {
+		log.Default().Printf("could not start nbi http(s) server")
+	}
+
+}
+
+func (n *NbiServer) Stop() {
+	if n.server != nil {
+		err := n.server.Close()
+		if err != nil {
+			log.Default().Printf("could not stop nbi server")
+		}
+	}
+
+	if n.capifCtx != nil {
+		_ = n.capifCtx.DeleteService()
+	}
+
+}
+
+func (n *NbiServer) Run(wg *sync.WaitGroup) {
+	wg.Add(1)
+	go n.startListening(wg)
+
+}

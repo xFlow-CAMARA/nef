@@ -1,0 +1,12 @@
+capifSvc: capif-connector:8080
+nbi:
+  fqdn: 3gpp-traffic-influence.local
+  httpVersion: 1
+  port: 8080
+  useTLS: false
+sbi:
+  httpVersion: 2
+  nrfSvc: http://nrf.net01.3gpp.eurecom.fr
+  pcfSvc: {{PCF_SERVICE_URL}}
+  useNrf: false
+supportedFeatures: 3fff

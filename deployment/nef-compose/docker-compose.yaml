@@ -1,0 +1,212 @@
+
+services:
+####################### NORTHBOUND SERVICES #######################
+  as-session-with-qos:
+    container_name: 3gpp-as-session-with-qos
+    image: openexposure/as-session-with-qos:develop
+    restart: always
+    volumes:
+      - ./config/asSessionWithQos.yaml:/etc/config.yaml
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+#    depends_on:
+#     capif-connector:
+#        condition: service_healthy
+
+  traffic-influence:
+    container_name: 3gpp-traffic-influence
+    image: openexposure/traffic-influence:develop
+    volumes:
+      - ./config/trafficInfluence.yaml:/etc/config.yaml
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+#    depends_on:
+#     capif-connector:
+#        condition: service_healthy
+
+  monitoring-event:
+    container_name: 3gpp-monitoring-event
+    image: openexposure/monitoring-event:develop
+    networks:
+      bridge_net:
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./config/monitoringEvent.yaml:/etc/config.yaml
+#    depends_on:
+#     capif-connector:
+#        condition: service_healthy
+
+  ue-id:
+    container_name: 3gpp-ueid
+    image: openexposure/ue-id:develop
+    networks:
+      bridge_net:
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./config/ueId.yaml:/etc/config.yaml
+#    depends_on:
+#     capif-connector:
+#        condition: service_healthy
+
+  ue-address:
+    container_name: 3gpp-ue-address
+    image: openexposure/ue-address:develop
+    networks:
+      bridge_net:
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./config/ueAddress.yaml:/etc/config.yaml
+#    depends_on:
+#     capif-connector:
+#        condition: service_healthy
+
+  ingress-controller:
+    container_name: ingress-controller
+    image: nginx:latest
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./config/ingress.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - as-session-with-qos
+      - traffic-influence
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+
+  # capif-connector:
+  #   container_name: capif-connector
+  #   image: openexposure/capif-service:develop
+  #   environment:
+  #     - CAPIF_FQDN=vm03.netsoft.cs.eurecom.fr
+  #     - CAPIF_AUTH_PORT=8084
+  #     - CAPIF_USERNAME=open-exposure-test
+  #     - CAPIF_PASSWORD=eurecomopenex
+  #     - INGRESS_FQDN=nef.eurecom.fr
+  #   extra_hosts:
+  #     - vm03.netsoft.cs.eurecom.fr:172.21.25.3 
+  #   healthcheck:
+  #     test: ["CMD", "curl", "localhost:8080"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     bridge_net:
+
+####################### MIDDLEWARE SERVICES #######################
+  ue-profile:
+    container_name: ue-profile-service
+    image: openexposure/ue-profile-service:develop
+    environment:
+      - REDIS_SVC=redis:6379
+      - NBI_PORT=8080
+      - HTTPS=false
+      - HTTP_VER=1
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+
+  ue-identity:
+    container_name: ue-identity-service
+    image: openexposure/ue-identity-service:develop
+    environment:
+      - REDIS_SVC=redis:6379
+      - NBI_PORT=8080
+      - HTTPS=false
+      - HTTP_VER=1
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+
+  dataset-exporter:
+    container_name: dataset-exporter
+    image: openexposure/dataset-exporter:develop
+    environment:
+      - REDIS_SVC=redis:6379
+      - HTTP_PORT=8080
+      - HTTPS=false
+      - HTTP_VER=1
+    healthcheck:
+      test: ["CMD", "curl", "localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      bridge_net:
+
+  redis:
+    image: redis/redis-stack-server:latest  # includes RedisJSON, Streams, etc.
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      bridge_net:
+
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redisinsight
+    ports:
+      - "8001:5540"
+    restart: unless-stopped
+    networks:
+      bridge_net:
+
+####################### SOUTHBOUND SERVICES #######################
+  core-network-service:
+    container_name: core-network-service
+    image: openexposure/core-network-service:develop
+    restart: always
+    environment:
+      - USE_NRF=False
+      - CN_HTTP_VERSION=2
+      - REDIS_ADDR=redis:6379
+      - AMF_IP_ADDR=http://core-simulator:8080
+      - SMF_IP_ADDR=http://core-simulator:8080
+      - EVENT_NOTIFY_URI=http://core-network-service:9090
+      - SERVER_ADDR=core-network-service:9090
+    depends_on:
+      redis:
+        condition: service_started
+    networks:
+      bridge_net:
+
+networks:
+  bridge_net:
+    name: nef-bridge
+    driver: bridge

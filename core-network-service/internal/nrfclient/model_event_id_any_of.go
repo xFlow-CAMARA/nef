@@ -1,0 +1,135 @@
+// Copyright 2025 EURECOM
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Contributors:
+//   Giulio CAROTA
+//   Thomas DU
+//   Adlen KSENTINI
+
+package nrfclient
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// EventIdAnyOf the model 'EventIdAnyOf'
+type EventIdAnyOf string
+
+// List of EventId_anyOf
+const (
+	LOAD_LEVEL_INFORMATION EventIdAnyOf = "LOAD_LEVEL_INFORMATION"
+	NETWORK_PERFORMANCE    EventIdAnyOf = "NETWORK_PERFORMANCE"
+	NF_LOAD                EventIdAnyOf = "NF_LOAD"
+	SERVICE_EXPERIENCE     EventIdAnyOf = "SERVICE_EXPERIENCE"
+	UE_MOBILITY            EventIdAnyOf = "UE_MOBILITY"
+	UE_COMMUNICATION       EventIdAnyOf = "UE_COMMUNICATION"
+	QOS_SUSTAINABILITY     EventIdAnyOf = "QOS_SUSTAINABILITY"
+	ABNORMAL_BEHAVIOUR     EventIdAnyOf = "ABNORMAL_BEHAVIOUR"
+	USER_DATA_CONGESTION   EventIdAnyOf = "USER_DATA_CONGESTION"
+	NSI_LOAD_LEVEL         EventIdAnyOf = "NSI_LOAD_LEVEL"
+)
+
+// All allowed values of EventIdAnyOf enum
+var AllowedEventIdAnyOfEnumValues = []EventIdAnyOf{
+	"LOAD_LEVEL_INFORMATION",
+	"NETWORK_PERFORMANCE",
+	"NF_LOAD",
+	"SERVICE_EXPERIENCE",
+	"UE_MOBILITY",
+	"UE_COMMUNICATION",
+	"QOS_SUSTAINABILITY",
+	"ABNORMAL_BEHAVIOUR",
+	"USER_DATA_CONGESTION",
+	"NSI_LOAD_LEVEL",
+}
+
+func (v *EventIdAnyOf) UnmarshalJSON(src []byte) error {
+	var value string
+	err := json.Unmarshal(src, &value)
+	if err != nil {
+		return err
+	}
+	enumTypeValue := EventIdAnyOf(value)
+	for _, existing := range AllowedEventIdAnyOfEnumValues {
+		if existing == enumTypeValue {
+			*v = enumTypeValue
+			return nil
+		}
+	}
+
+	return fmt.Errorf("%+v is not a valid EventIdAnyOf", value)
+}
+
+// NewEventIdAnyOfFromValue returns a pointer to a valid EventIdAnyOf
+// for the value passed as argument, or an error if the value passed is not allowed by the enum
+func NewEventIdAnyOfFromValue(v string) (*EventIdAnyOf, error) {
+	ev := EventIdAnyOf(v)
+	if ev.IsValid() {
+		return &ev, nil
+	} else {
+		return nil, fmt.Errorf("invalid value '%v' for EventIdAnyOf: valid values are %v", v, AllowedEventIdAnyOfEnumValues)
+	}
+}
+
+// IsValid return true if the value is valid for the enum, false otherwise
+func (v EventIdAnyOf) IsValid() bool {
+	for _, existing := range AllowedEventIdAnyOfEnumValues {
+		if existing == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Ptr returns reference to EventId_anyOf value
+func (v EventIdAnyOf) Ptr() *EventIdAnyOf {
+	return &v
+}
+
+type NullableEventIdAnyOf struct {
+	value *EventIdAnyOf
+	isSet bool
+}
+
+func (v NullableEventIdAnyOf) Get() *EventIdAnyOf {
+	return v.value
+}
+
+func (v *NullableEventIdAnyOf) Set(val *EventIdAnyOf) {
+	v.value = val
+	v.isSet = true
+}
+
+func (v NullableEventIdAnyOf) IsSet() bool {
+	return v.isSet
+}
+
+func (v *NullableEventIdAnyOf) Unset() {
+	v.value = nil
+	v.isSet = false
+}
+
+func NewNullableEventIdAnyOf(val *EventIdAnyOf) *NullableEventIdAnyOf {
+	return &NullableEventIdAnyOf{value: val, isSet: true}
+}
+
+func (v NullableEventIdAnyOf) MarshalJSON() ([]byte, error) {
+	return json.Marshal(v.value)
+}
+
+func (v *NullableEventIdAnyOf) UnmarshalJSON(src []byte) error {
+	v.isSet = true
+	return json.Unmarshal(src, &v.value)
+}

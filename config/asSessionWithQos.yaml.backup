@@ -1,0 +1,29 @@
+capifSvc: capif-connector:8080
+nbi:
+  fqdn: 3gpp-as-session-with-qos.local
+  httpVersion: 1
+  port: 8080
+  useTLS: false
+qosConfig:
+  qos-e:
+    marBwDl: 120000
+    marBwUl: 120000
+    mediaType: CONTROL
+  qos2:
+    marBwDl: 240000
+    marBwUl: 240000
+    mediaType: CONTROL
+  qos3:
+    marBwDl: 480000
+    marBwUl: 480000
+    mediaType: CONTROL
+  qos4:
+    marBwDl: 960000
+    marBwUl: 960000
+    mediaType: VIDEO
+sbi:
+  httpVersion: 2
+  nrfSvc: http://nrf.net01.3gpp.eurecom.fr
+  pcfSvc: http://core-simulator:8080
+  useNrf: false
+supportedFeatures: 3fff

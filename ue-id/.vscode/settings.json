@@ -1,0 +1,10 @@
+{
+    "go.goroot": "/home/xflow/.go",
+    "go.alternateTools": {
+        "go": "/home/xflow/.go/bin/go"
+    },
+    "go.toolsManagement.go": "/home/xflow/.go/bin/go",
+    "terminal.integrated.env.linux": {
+        "PATH": "/home/xflow/.go/bin:${env:PATH}"
+    }
+}

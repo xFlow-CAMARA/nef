@@ -1,0 +1,14 @@
+nbi:
+  httpVersion: 1
+  useTLS: no
+  fqdn: 3gpp-traffic-influence
+  port: 8080
+
+sbi:
+  nrfSvc: http://nrf.free5gc.org
+  useNrf: no
+  pcfSvc: http://pcf.free5gc.org
+  httpVersion: 2
+
+supportedFeatures: 3fff # 12 for open5gs, 3fff for free5gs
+capifSvc: #http://capif.nef.org

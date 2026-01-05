@@ -1,0 +1,14 @@
+nbi:
+  httpVersion: 1
+  useTLS: no
+  fqdn: 3gpp-ue-address
+  port: 8888
+
+sbi:
+  identitySvc: http://172.26.0.7:8080
+  profileSvc: http://172.26.0.4:8080
+  httpVersion: 1
+
+supportedFeatures: 3fff # 12 for open5gs, 3fff for free5gs
+capifSvc: http://capif.nef.org
+
