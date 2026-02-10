@@ -25,7 +25,6 @@ NRF NFDiscovery Service. © 2019, 3GPP Organizational Partners (ARIB, ATIS, CCSA
 API version: 1.1.0.alpha-1
 */
 
-
 package nrfclient
 
 import (
