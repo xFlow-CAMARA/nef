@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   go-test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, camara-vm]
     timeout-minutes: 30
     env:
       GOTOOLCHAIN: local
@@ -47,7 +47,7 @@ jobs:
           done < <(find . -name go.mod -print0)
 
   docker-build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, camara-vm]
     timeout-minutes: 45
     steps:
       - name: Checkout
