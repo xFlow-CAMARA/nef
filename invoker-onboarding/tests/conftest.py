@@ -21,6 +21,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 os.environ.setdefault("APP_ENV", "dev")
 os.environ.setdefault("FIELD_KEY_PASSPHRASE", "unit-test-key")
 
+# Pin upstream URLs to known values so respx mocks match regardless of where
+# the tests run (local docker, GitHub Actions, etc.). Use forced assignment
+# rather than setdefault — the docker image may bake in CAPIF_CORE_URL via
+# docker run -e and we don't want that leaking into test expectations.
+os.environ["CAPIF_CORE_URL"]     = "https://test-capif"
+os.environ["CAPIF_REGISTER_URL"] = "https://test-register"
+os.environ["CAPIF_SERVICE_URL"]  = "http://test-capif-service"
+
 import db                                       # noqa: E402
 
 # In-memory Mongo for the whole test session. Must happen BEFORE any test
