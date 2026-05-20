@@ -29,13 +29,22 @@ _http: httpx.Client = httpx.Client(timeout=5.0)
 _redis: redis.Redis | None = None
 
 # Catalog cache — the CAPIF API catalogue rarely changes between approvals,
-# so we cache it for `_CATALOG_TTL_S` seconds to avoid an HTTP round-trip on
-# every admin action.
-_CATALOG_TTL_S = float(os.getenv("CAPIF_CATALOG_TTL_S", "30"))
+# so we cache it for `CAPIF_CATALOG_TTL_S` seconds (env, read at call time)
+# to avoid an HTTP round-trip on every admin action.
 _catalog_cache: tuple[float, dict[str, dict]] = (0.0, {})
 
 
+def _catalog_ttl() -> float:
+    return float(os.getenv("CAPIF_CATALOG_TTL_S", "30"))
+
+
 def _get_redis() -> redis.Redis:
+    """Lazily open the Redis publisher.
+
+    `decode_responses=True` is correct here because the ACL channel speaks
+    ASCII (`create-acl:{id}:{...}`). If the channel ever carries binary
+    payloads (e.g. Protobuf events), flip this to False and decode per-call.
+    """
     global _redis
     if _redis is None:
         _redis = redis.from_url(CAPIF_REDIS_URL, decode_responses=True)
@@ -47,7 +56,7 @@ def _catalog_map(force: bool = False) -> dict[str, dict]:
     global _catalog_cache
     ts, cached = _catalog_cache
     now = time.monotonic()
-    if not force and cached and (now - ts) < _CATALOG_TTL_S:
+    if not force and cached and (now - ts) < _catalog_ttl():
         return cached
 
     try:

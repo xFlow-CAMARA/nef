@@ -40,7 +40,8 @@ from datetime import datetime, timezone
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
+from typing import Annotated
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
@@ -54,7 +55,7 @@ from db import (
     encrypt,
     decrypt,
 )
-from config import required, assert_dev_is_local
+from config import CAMARA_SCOPES, CamaraScope, required, assert_dev_is_local
 from admin_router import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
@@ -99,9 +100,10 @@ def _shutdown_clients() -> None:
         _http.close()
     except Exception:
         pass
-    # acl_bridge holds its own redis client; close it if it was opened.
+    # acl_bridge holds a pooled httpx client AND a lazy redis client.
     try:
         import acl_bridge
+        acl_bridge._http.close()
         if acl_bridge._redis is not None:
             acl_bridge._redis.close()
             acl_bridge._redis = None
@@ -156,8 +158,14 @@ def _capif_post(path: str, body: dict, token: str) -> dict:
         headers={"Authorization": f"Bearer {token}"},
     )
     if r.status_code not in (200, 201):
-        log.error("CAPIF %s → %d: %s", path, r.status_code, r.text)
-        raise HTTPException(status_code=r.status_code, detail=r.text)
+        # Log the full upstream response server-side; return a sanitized
+        # message to the caller so internal hostnames / stack traces don't
+        # flow to the browser.
+        log.error("CAPIF %s → %d: %s", path, r.status_code, r.text[:500])
+        raise HTTPException(
+            status_code=502 if r.status_code >= 500 else r.status_code,
+            detail=f"CAPIF rejected request ({r.status_code})",
+        )
     return r.json()
 
 
@@ -202,14 +210,23 @@ def _generate_key_and_csr(common_name: str):
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 class OnboardRequest(BaseModel):
-    invoker_name:     str
+    # Tight invoker_name regex: lower-case-safe characters only, 3–40 chars.
+    # This becomes part of a Keycloak client_id (see submit_registration),
+    # so it must be a value Keycloak will accept without further escaping.
+    invoker_name: Annotated[
+        str,
+        StringConstraints(min_length=3, max_length=40, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]+[A-Za-z0-9]$"),
+    ]
     description:      str | None = None
     notification_url: str | None = "http://localhost/capif-callback"
     # Developer identity — stored for admin review
     contact_email:    str | None = None
     company:          str | None = None
     use_case:         str | None = None
-    requested_apis:   list[str] = []   # e.g. ["quality-on-demand", "location-retrieval"]
+    # Restricted to the canonical CAMARA scope list (config.CAMARA_SCOPES).
+    # Unknown values now produce a 422 at the boundary instead of a silent
+    # garbage-in/garbage-out admin review item.
+    requested_apis:   list[CamaraScope] = Field(default_factory=list)
 
 
 class OnboardResponse(BaseModel):
@@ -248,6 +265,14 @@ def health():
     return {"status": "ok", "service": "invoker-onboarding", "version": "2.0.0"}
 
 
+@app.get("/scopes")
+def list_scopes():
+    """Return the canonical CAMARA scope list this deployment supports.
+    Single source of truth for the dashboard's playground + try-route
+    allowlist + admin approval modal."""
+    return {"scopes": list(CAMARA_SCOPES)}
+
+
 @app.get("/apis", dependencies=[Depends(_require_dev_key)])
 def discover_apis():
     try:
@@ -261,7 +286,7 @@ def discover_apis():
 
 @app.post("/invokers", response_model=OnboardResponse, status_code=201,
           dependencies=[Depends(_require_dev_key)])
-def submit_registration(req: OnboardRequest):
+def submit_registration(req: OnboardRequest, x_actor: str | None = Header(None)):
     """
     Submit a new invoker registration request.
 
@@ -362,7 +387,11 @@ def submit_registration(req: OnboardRequest):
         },
     }
     _col.insert_one(doc)
-    _audit_log("submitted", invoker_id, actor=req.contact_email or "anonymous",
+    # Actor on the submit row comes from X-Actor (set by the trusted
+    # dashboard proxy from the authenticated session). If absent (direct
+    # FastAPI call), fall back to anonymous — never trust req.contact_email
+    # since the developer could put anything in the body.
+    _audit_log("submitted", invoker_id, actor=x_actor or "anonymous",
                detail={"requested_apis": req.requested_apis})
 
     log.info("Invoker %s registered — awaiting admin approval", invoker_id)

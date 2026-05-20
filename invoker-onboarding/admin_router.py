@@ -115,10 +115,20 @@ def _doc_to_summary(doc: dict) -> InvokerSummary:
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.get("/invokers", response_model=list[InvokerSummary])
-def list_invokers(status: str | None = Query(None, description="Filter by approval_status")):
-    """List all registered invokers, optionally filtered by status."""
+def list_invokers(
+    status: str | None = Query(None, description="Filter by approval_status"),
+    limit:  int        = Query(50, ge=1, le=500),
+    skip:   int        = Query(0,  ge=0),
+):
+    """List registered invokers, newest first. Paginated to keep responses
+    bounded for installations with many invokers."""
     query = {"approval_status": status} if status else {}
-    docs = list(_col.find(query, ADMIN_PROJECTION).sort("submitted_at", -1))
+    docs = list(
+        _col.find(query, ADMIN_PROJECTION)
+            .sort("submitted_at", -1)
+            .skip(skip)
+            .limit(limit)
+    )
     return [_doc_to_summary(d) for d in docs]
 
 
@@ -160,9 +170,15 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     """
     Approve an invoker registration.
 
-    1. Sets approval_status → 'approved'
-    2. Creates a Keycloak client scoped to req.scopes_approved
-    3. Stores the Keycloak client_id for the invoker to use
+    Three external mutations happen here:
+      1. Create the Keycloak client (network)
+      2. Publish CAPIF ACL events to Redis      (network)
+      3. Persist approval state in Mongo
+
+    Each can fail independently. If step 3 fails after 1/2 succeeded, we
+    end up with an orphan Keycloak client + dangling ACL entries that the
+    next approve attempt will collide with. Compensate explicitly so the
+    system either fully commits or fully rolls back.
     """
     doc = _col.find_one({"invoker_id": invoker_id})
     if not doc:
@@ -176,7 +192,7 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     if not req.scopes_approved:
         raise HTTPException(422, "At least one scope must be approved")
 
-    # Create Keycloak client with approved scopes
+    # Step 1: Keycloak. Failure here is clean — nothing else has happened yet.
     try:
         kc = create_keycloak_client(
             invoker_id=invoker_id,
@@ -185,10 +201,10 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
         )
     except Exception as e:
         log.error("Keycloak client creation failed for %s: %s", invoker_id, e)
-        raise HTTPException(502, f"Keycloak client creation failed: {e}")
+        raise HTTPException(502, "Keycloak client creation failed")
 
-    now = _now()
-    # Create CAPIF ACL entries for approved scopes (best-effort)
+    # Step 2: ACL events (best-effort by design — we still proceed even if
+    # some scopes aren't published, but we track which were).
     acl_published = create_acl_entries(invoker_id, req.scopes_approved)
     if len(acl_published) < len(req.scopes_approved):
         log.warning(
@@ -196,20 +212,37 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
             len(acl_published), len(req.scopes_approved), invoker_id,
         )
 
-    _col.update_one(
-        {"invoker_id": invoker_id},
-        {"$set": {
-            "approval_status":         "approved",
-            "scopes_approved":         req.scopes_approved,
-            "approved_at":             now,
-            "approved_by":             req.approved_by,
-            "rejection_reason":        None,
-            "keycloak_client_id":      kc["client_id"],
-            "secrets.keycloak_secret": encrypt(kc["client_secret"]),
-            "internal.keycloak_uuid":  kc["keycloak_uuid"],
-            "internal.acl_published":  acl_published,
-        }},
-    )
+    # Step 3: Mongo. If this fails we MUST undo the Keycloak client (else
+    # the next retry collides with 409 client-exists), and try to take
+    # back the ACL entries we already announced.
+    now = _now()
+    try:
+        _col.update_one(
+            {"invoker_id": invoker_id},
+            {"$set": {
+                "approval_status":         "approved",
+                "scopes_approved":         req.scopes_approved,
+                "approved_at":             now,
+                "approved_by":             req.approved_by,
+                "rejection_reason":        None,
+                "keycloak_client_id":      kc["client_id"],
+                "secrets.keycloak_secret": encrypt(kc["client_secret"]),
+                "internal.keycloak_uuid":  kc["keycloak_uuid"],
+                "internal.acl_published":  acl_published,
+            }},
+        )
+    except Exception as e:
+        log.error("Mongo update failed for %s after external provisioning: %s — compensating", invoker_id, e)
+        try:
+            delete_keycloak_client(kc["keycloak_uuid"])
+        except Exception as ke:
+            log.error("Keycloak rollback failed for %s: %s — manual cleanup needed", invoker_id, ke)
+        if acl_published:
+            try:
+                remove_acl_entries(invoker_id)
+            except Exception as ae:
+                log.error("ACL rollback failed for %s: %s", invoker_id, ae)
+        raise HTTPException(503, "Approval failed mid-flight; please retry")
     _audit_log(
         "approved", invoker_id,
         actor=req.approved_by,

@@ -17,7 +17,7 @@ import os
 
 import httpx
 
-from config import required
+from config import CAMARA_SCOPES, required
 
 log = logging.getLogger("invoker-onboarding.keycloak")
 
@@ -27,16 +27,9 @@ KEYCLOAK_ADMIN_ID = os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", "admin-cli")
 KEYCLOAK_ADMIN_UN = required("KEYCLOAK_ADMIN_USERNAME", "admin")
 KEYCLOAK_ADMIN_PW = required("KEYCLOAK_ADMIN_PASSWORD", "admin")
 
-# All recognised CAMARA scopes — subset is granted at approval time
-ALL_CAMARA_SCOPES = [
-    "quality-on-demand",
-    "location-retrieval",
-    "traffic-influence",
-    "number-verification",
-    "device-status",
-    "device-reachability-status",
-    "sim-swap",
-]
+# Re-export the central scope list for backward compatibility — the
+# canonical source is config.CAMARA_SCOPES.
+ALL_CAMARA_SCOPES = list(CAMARA_SCOPES)
 
 _http = httpx.Client(timeout=15.0)
 

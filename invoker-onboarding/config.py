@@ -1,6 +1,6 @@
 """Shared configuration helpers.
 
-Two principles enforced here:
+Three things live here:
   1. Every secret read is a function call — never a module-level constant.
      Lets workers pick up rotated values on restart, and lets tests use
      monkeypatch.setenv without needing importlib.reload.
@@ -8,11 +8,40 @@ Two principles enforced here:
      dev mode if any upstream URL points at something that isn't localhost
      or a known Docker hostname. Stops dev defaults from accidentally
      decrypting production data.
+  3. CAMARA_SCOPES is the single source of truth for the API names this
+     deployment supports — imported by main.py (Pydantic validation) and
+     keycloak_bridge.py (scope-to-Keycloak mapping). Exposed via the
+     /scopes endpoint for the dashboard.
 """
 
 import logging
 import os
+from typing import Literal
 from urllib.parse import urlparse
+
+
+# Single source of truth for CAMARA API scopes. Must match the scope names
+# in the Keycloak realm JSON (config/keycloak/camara-realm.json).
+CAMARA_SCOPES: tuple[str, ...] = (
+    "quality-on-demand",
+    "location-retrieval",
+    "traffic-influence",
+    "number-verification",
+    "device-status",
+    "device-reachability-status",
+    "sim-swap",
+)
+
+# Type alias for Pydantic Literal validation
+CamaraScope = Literal[
+    "quality-on-demand",
+    "location-retrieval",
+    "traffic-influence",
+    "number-verification",
+    "device-status",
+    "device-reachability-status",
+    "sim-swap",
+]
 
 log = logging.getLogger("invoker-onboarding.config")
 
