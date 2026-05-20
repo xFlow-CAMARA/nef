@@ -44,14 +44,18 @@ func main() {
 		log.Fatalf("initialization failed: %s", err.Error())
 	}
 
+	/* Publish all CAMARA APIs to CAPIF Core */
+	capif.PublishDefaultAPIs()
+
 	/* Define HTTP Router */
 	r := mux.NewRouter()
 
-	//r.HandleFunc("/provider", handlers.HandleMicroserviceRegistration)
 	r.HandleFunc("/services", handlers.HandleServiceCreation)
 	r.HandleFunc("/services/{serviceId}", handlers.HandleIndividualService)
 	r.HandleFunc("/services/{serviceId}/logs", handlers.HandleLogEntry)
 	r.HandleFunc("/services/{serviceId}/validateToken", handlers.HandleTokenValidation)
+	r.HandleFunc("/auth/validate", handlers.HandleValidateByPath)
+	r.HandleFunc("/catalog", handlers.HandleCatalog)
 	r.HandleFunc("/version", handlers.HandleCapifServiceProfile)
 	r.HandleFunc("/healthz", handlers.HandleHeartbeat)
 

@@ -137,6 +137,41 @@ func DeletePublishedApi(serviceId string) error {
 	return nil
 }
 
+// ValidateByPath validates a CAPIF Bearer token for a given API path and logs
+// the invocation to the CAPIF Core. Returns an OauthInfo with Valid=true and
+// the extracted InvokerId on success.
+func ValidateByPath(apiPath string, authData *OauthInfo) error {
+	svc := ServiceByPath(apiPath)
+	if svc == nil {
+		return fmt.Errorf("no published API matches path %q", apiPath)
+	}
+
+	aefId := providerInstance.FuncId[AEF]
+	err := ValidateInvokerToken(aefId, svc.ServiceName, authData)
+	if err != nil {
+		return err
+	}
+
+	// Fire-and-forget invocation log
+	go func() {
+		logData := &LogInfo{
+			Operation:   "GET",
+			Endpoint:    apiPath,
+			Result:      "Success",
+			TimeStamp:   0,
+			Protocol:    "HTTP_2",
+			InvokerId:   authData.InvokerId,
+			SourceIp:    "0.0.0.0",
+			DestinationIp: "0.0.0.0",
+		}
+		if err := PushLoggingEntry(svc.ServiceId, logData); err != nil {
+			log.Printf("ValidateByPath: log push failed: %v", err)
+		}
+	}()
+
+	return nil
+}
+
 func NewLogEntry(serviceId string, logData *LogInfo) error {
 	/*token, err := retrieveAccessToken()
 	if err != nil {

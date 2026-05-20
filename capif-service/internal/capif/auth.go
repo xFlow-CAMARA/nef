@@ -28,9 +28,24 @@ import (
 	"github.com/golang-jwt/jwt"
 )
 
+// loadCapifPublicKey reads the CAPIF Security service's RS256 public key.
+// Prefers CAPIF_SECURITY_PUBKEY env var (raw PEM), then falls back to the
+// file at CAPIF_SECURITY_PUBKEY_PATH, then certs/capif_security.pub.
+func loadCapifPublicKey() ([]byte, error) {
+	if pem := os.Getenv("CAPIF_SECURITY_PUBKEY"); pem != "" {
+		// Docker injects env-var \n as literal backslash-n; convert to real newlines.
+		pem = strings.ReplaceAll(pem, `\n`, "\n")
+		return []byte(pem), nil
+	}
+	path := os.Getenv("CAPIF_SECURITY_PUBKEY_PATH")
+	if path == "" {
+		path = "certs/capif_security.pub"
+	}
+	return os.ReadFile(path)
+}
+
 func ValidateInvokerToken(aefId string, apiName string, authData *OauthInfo) error {
-	// Read the public key from the file
-	pubKeyBytes, err := os.ReadFile("certs/ca.crt")
+	pubKeyBytes, err := loadCapifPublicKey()
 	if err != nil {
 		return err
 	}

@@ -134,6 +134,55 @@ func HandleTokenValidation(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleValidateByPath validates a CAPIF Bearer token for any CAMARA API path.
+// Kong calls this endpoint on every proxied request.
+//
+// Request:  POST /auth/validate
+//   Body:   {"token": "<bearer>", "api_path": "/quality-on-demand/..."}
+//
+// Response 200: {"valid":true,"invoker_id":"INV...","api_name":"quality-on-demand"}
+// Response 401: missing/malformed token
+// Response 403: invalid token or path not found
+func HandleValidateByPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Token   string `json:"token"`
+		ApiPath string `json:"api_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Token == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "missing token or api_path"})
+		return
+	}
+
+	authData := &capif.OauthInfo{Token: req.Token}
+	if err := capif.ValidateByPath(req.ApiPath, authData); err != nil {
+		log.Printf("HandleValidateByPath: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"valid":      true,
+		"invoker_id": authData.InvokerId,
+		"api_name":   authData.ApiName,
+	})
+}
+
+func HandleCatalog(w http.ResponseWriter, r *http.Request) {
+	catalog := capif.GetPublishedCatalog()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(catalog)
+}
+
 func HandleCallbacks(w http.ResponseWriter, r *http.Request)           {}
 func HandleCapifServiceProfile(w http.ResponseWriter, r *http.Request) {}
 
