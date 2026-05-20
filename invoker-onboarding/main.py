@@ -30,36 +30,43 @@ CAPIF_SERVICE_URL   Internal URL of the NEF capif-service for catalog lookup
 MONGODB_URI         MongoDB connection string (default: mongodb://camara-mongodb:27017/camara)
 """
 
-import os
 import logging
+import os
 import secrets
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from typing import Annotated, Literal
 
 import httpx
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, StringConstraints
-from typing import Annotated
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
+from admin_router import router as admin_router
+from config import CAMARA_SCOPES, CamaraScope, assert_dev_is_local, required
+from db import (
+    SAFE_PROJECTION,
+    decrypt,
+    encrypt,
+)
+from db import (
+    audit as _audit_log,
+)
 from db import (
     invokers as _col,
-    audit as _audit_log,
-    now as _now,
-    SAFE_PROJECTION,
-    encrypt,
-    decrypt,
 )
-from config import CAMARA_SCOPES, CamaraScope, required, assert_dev_is_local
-from admin_router import router as admin_router
+from db import (
+    now as _now,
+)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("invoker-onboarding")
+
+ApprovalStatus = Literal["pending", "approved", "rejected", "suspended"]
 
 # Fail fast if APP_ENV=dev is paired with non-local upstreams.
 assert_dev_is_local()
@@ -160,12 +167,13 @@ def _capif_post(path: str, body: dict, token: str) -> dict:
     if r.status_code not in (200, 201):
         # Log the full upstream response server-side; return a sanitized
         # message to the caller so internal hostnames / stack traces don't
-        # flow to the browser.
+        # flow to the browser. Upstream 401/403/5xx all map to 502 (it's our
+        # service-to-service problem, not the dev's). Only 400/422 — which
+        # genuinely reflect the dev's request shape — are passed through.
         log.error("CAPIF %s → %d: %s", path, r.status_code, r.text[:500])
-        raise HTTPException(
-            status_code=502 if r.status_code >= 500 else r.status_code,
-            detail=f"CAPIF rejected request ({r.status_code})",
-        )
+        if r.status_code in (400, 422):
+            raise HTTPException(r.status_code, "CAPIF rejected request shape")
+        raise HTTPException(502, "CAPIF upstream error")
     return r.json()
 
 
@@ -231,7 +239,7 @@ class OnboardRequest(BaseModel):
 
 class OnboardResponse(BaseModel):
     invoker_id:      str
-    approval_status: str
+    approval_status: ApprovalStatus
     message:         str
 
 
@@ -250,7 +258,7 @@ class TokenResponse(BaseModel):
 class InvokerStatus(BaseModel):
     invoker_id:         str
     invoker_name:       str
-    approval_status:    str
+    approval_status:    ApprovalStatus
     submitted_at:       str
     approved_at:        str | None = None
     rejection_reason:   str | None = None
@@ -280,7 +288,8 @@ def discover_apis():
         r.raise_for_status()
         entries = r.json()
     except Exception as e:
-        raise HTTPException(502, f"Cannot reach capif-service catalog: {e}")
+        log.error("capif-service catalog fetch failed: %s", e)
+        raise HTTPException(502, "Catalog backend unavailable") from None
     return {"apis": entries, "capif_core": CAPIF_CORE_URL}
 
 
@@ -301,7 +310,8 @@ def submit_registration(req: OnboardRequest, x_actor: str | None = Header(None))
     try:
         token = _bootstrap_token()
     except Exception as e:
-        raise HTTPException(502, f"Cannot reach CAPIF register: {e}")
+        log.error("CAPIF register bootstrap failed: %s", e)
+        raise HTTPException(502, "CAPIF register backend unavailable") from None
 
     onboard_body = {
         "apiInvokerName":        req.invoker_name,
@@ -428,7 +438,7 @@ def get_invoker_credentials(invoker_id: str, x_actor: str | None = Header(None))
             secret = decrypt(encrypted)
         except Exception:
             log.error("Could not decrypt stored secret for %s — key rotated?", invoker_id)
-            raise HTTPException(503, "Stored credentials unreadable — contact operator")
+            raise HTTPException(503, "Stored credentials unreadable — contact operator") from None
 
     _audit_log("credentials_revealed", invoker_id, actor=x_actor or "unknown")
 
@@ -506,7 +516,7 @@ def get_token(invoker_id: str, req: TokenRequest):
         key_pem  = decrypt(doc["secrets"]["key_pem"])
     except Exception:
         log.error("Could not decrypt stored mTLS material for %s — FIELD_KEY rotated?", invoker_id)
-        raise HTTPException(503, "Stored credentials unreadable — contact operator")
+        raise HTTPException(503, "Stored credentials unreadable — contact operator") from None
     with _mtls_client(cert_pem, key_pem) as mtls:
         r = mtls.post(
             f"{CAPIF_CORE_URL}/capif-security/v1/securities/{invoker_id}/token",
@@ -543,7 +553,8 @@ def offboard_invoker(invoker_id: str, x_actor: str | None = Header(None)):
     try:
         token = _bootstrap_token()
     except Exception as e:
-        raise HTTPException(502, f"Cannot reach CAPIF register: {e}")
+        log.error("CAPIF register bootstrap failed: %s", e)
+        raise HTTPException(502, "CAPIF register backend unavailable") from None
 
     r = _http.delete(
         f"{CAPIF_CORE_URL}/api-invoker-management/v1/onboardedInvokers/{invoker_id}",

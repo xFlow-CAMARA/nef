@@ -1,0 +1,24 @@
+# Conservative ruff config: catch real bugs (E, F, B, UP) without nitpicking
+# style choices our codebase already settled on (column alignment etc.).
+
+target-version = "py311"
+line-length    = 110
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names)
+    "B",    # bugbear (common bug patterns)
+    "UP",   # pyupgrade (modern syntax)
+    "I",    # import sorting
+]
+ignore = [
+    "E501",  # line too long — manual alignment in this codebase is intentional
+    "E241",  # multiple spaces after comma — same reason
+    "E221",  # multiple spaces before operator — alignment of dict values
+    "E702",  # multiple statements on one line; we use `cf.write(); cf.flush(); cf.close()`
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E402"]   # module-level imports after env-setup are required there
+"main.py" = ["E402"]   # assert_dev_is_local() runs before bridge module imports

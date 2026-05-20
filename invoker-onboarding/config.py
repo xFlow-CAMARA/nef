@@ -16,32 +16,24 @@ Three things live here:
 
 import logging
 import os
-from typing import Literal
+from enum import StrEnum
 from urllib.parse import urlparse
 
 
 # Single source of truth for CAMARA API scopes. Must match the scope names
 # in the Keycloak realm JSON (config/keycloak/camara-realm.json).
-CAMARA_SCOPES: tuple[str, ...] = (
-    "quality-on-demand",
-    "location-retrieval",
-    "traffic-influence",
-    "number-verification",
-    "device-status",
-    "device-reachability-status",
-    "sim-swap",
-)
+class CamaraScope(StrEnum):
+    QUALITY_ON_DEMAND          = "quality-on-demand"
+    LOCATION_RETRIEVAL         = "location-retrieval"
+    TRAFFIC_INFLUENCE          = "traffic-influence"
+    NUMBER_VERIFICATION        = "number-verification"
+    DEVICE_STATUS              = "device-status"
+    DEVICE_REACHABILITY_STATUS = "device-reachability-status"
+    SIM_SWAP                   = "sim-swap"
 
-# Type alias for Pydantic Literal validation
-CamaraScope = Literal[
-    "quality-on-demand",
-    "location-retrieval",
-    "traffic-influence",
-    "number-verification",
-    "device-status",
-    "device-reachability-status",
-    "sim-swap",
-]
+
+# Backwards-compatible tuple — derived from the enum so the two can't drift.
+CAMARA_SCOPES: tuple[str, ...] = tuple(s.value for s in CamaraScope)
 
 log = logging.getLogger("invoker-onboarding.config")
 

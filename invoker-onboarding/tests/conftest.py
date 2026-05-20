@@ -6,8 +6,8 @@ before binding their own references.
 """
 
 import os
-import sys
 import pathlib
+import sys
 
 import mongomock
 import pytest
@@ -29,7 +29,7 @@ os.environ["CAPIF_CORE_URL"]     = "https://test-capif"
 os.environ["CAPIF_REGISTER_URL"] = "https://test-register"
 os.environ["CAPIF_SERVICE_URL"]  = "http://test-capif-service"
 
-import db                                       # noqa: E402
+import db  # noqa: E402
 
 # In-memory Mongo for the whole test session. Must happen BEFORE any test
 # module imports admin_router / main (those bind `db.invokers` at import).

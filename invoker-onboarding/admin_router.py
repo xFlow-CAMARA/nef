@@ -16,20 +16,30 @@ keep the demo self-contained.
 import logging
 import os
 import secrets
+from typing import Literal
 
+import pymongo
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
 
-from keycloak_bridge import create_keycloak_client, delete_keycloak_client
 from acl_bridge import create_acl_entries, remove_acl_entries
 from db import (
-    invokers as _col,
-    audit_logs as _audit,
-    audit as _audit_log,
-    now as _now,
     ADMIN_PROJECTION,
     encrypt,
 )
+from db import (
+    audit as _audit_log,
+)
+from db import (
+    audit_logs as _audit,
+)
+from db import (
+    invokers as _col,
+)
+from db import (
+    now as _now,
+)
+from keycloak_bridge import create_keycloak_client, delete_keycloak_client
 
 log = logging.getLogger("invoker-onboarding.admin")
 
@@ -67,10 +77,13 @@ class RevokeRequest(BaseModel):
     revoked_by: str                     # injected by dashboard
 
 
+ApprovalStatus = Literal["pending", "approved", "rejected", "suspended"]
+
+
 class InvokerSummary(BaseModel):
     invoker_id:      str
     invoker_name:    str
-    approval_status: str
+    approval_status: ApprovalStatus
     submitted_at:    str
     contact_email:   str | None = None
     company:         str | None = None
@@ -180,19 +193,32 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     next approve attempt will collide with. Compensate explicitly so the
     system either fully commits or fully rolls back.
     """
-    doc = _col.find_one({"invoker_id": invoker_id})
-    if not doc:
-        raise HTTPException(404, f"Invoker {invoker_id} not found")
-
-    if doc["approval_status"] == "approved":
-        raise HTTPException(409, "Invoker is already approved")
-    if doc["approval_status"] == "rejected":
-        raise HTTPException(409, "Rejected invokers cannot be approved — use a new registration")
-
     if not req.scopes_approved:
         raise HTTPException(422, "At least one scope must be approved")
 
-    # Step 1: Keycloak. Failure here is clean — nothing else has happened yet.
+    # Atomic claim: transition pending → approving in one Mongo operation so
+    # two concurrent approvals can't both proceed (would otherwise create
+    # duplicate Keycloak clients and orphan one). Anyone else trying to
+    # approve at the same time sees a 409.
+    doc = _col.find_one_and_update(
+        {"invoker_id": invoker_id, "approval_status": "pending"},
+        {"$set": {"approval_status": "approving"}},
+        return_document=pymongo.ReturnDocument.BEFORE,
+    )
+    if doc is None:
+        existing = _col.find_one({"invoker_id": invoker_id}, {"approval_status": 1})
+        if existing is None:
+            raise HTTPException(404, f"Invoker {invoker_id} not found")
+        status_now = existing["approval_status"]
+        if status_now == "approving":
+            raise HTTPException(409, "Invoker is currently being approved by another request")
+        if status_now == "approved":
+            raise HTTPException(409, "Invoker is already approved")
+        if status_now == "rejected":
+            raise HTTPException(409, "Rejected invokers cannot be approved — use a new registration")
+        raise HTTPException(409, f"Invoker not in pending state (current: {status_now})")
+
+    # Step 1: Keycloak. Failure here means rolling back our transient state.
     try:
         kc = create_keycloak_client(
             invoker_id=invoker_id,
@@ -201,7 +227,13 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
         )
     except Exception as e:
         log.error("Keycloak client creation failed for %s: %s", invoker_id, e)
-        raise HTTPException(502, "Keycloak client creation failed")
+        # Revert the transient 'approving' state back to 'pending' so the
+        # admin can retry without hitting the 409 above.
+        _col.update_one(
+            {"invoker_id": invoker_id, "approval_status": "approving"},
+            {"$set": {"approval_status": "pending"}},
+        )
+        raise HTTPException(502, "Keycloak client creation failed") from None
 
     # Step 2: ACL events (best-effort by design — we still proceed even if
     # some scopes aren't published, but we track which were).
@@ -242,7 +274,12 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
                 remove_acl_entries(invoker_id)
             except Exception as ae:
                 log.error("ACL rollback failed for %s: %s", invoker_id, ae)
-        raise HTTPException(503, "Approval failed mid-flight; please retry")
+        # Revert transient state to pending so the admin can retry.
+        _col.update_one(
+            {"invoker_id": invoker_id, "approval_status": "approving"},
+            {"$set": {"approval_status": "pending"}},
+        )
+        raise HTTPException(503, "Approval failed mid-flight; please retry") from None
     _audit_log(
         "approved", invoker_id,
         actor=req.approved_by,
@@ -353,16 +390,22 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
 def get_audit_log(
     invoker_id: str | None = Query(None),
     action:     str | None = Query(None),
-    limit:      int        = Query(100, le=500),
+    limit:      int        = Query(100, ge=1, le=500),
+    skip:       int        = Query(0,   ge=0),
 ):
-    """Paginated audit log of all governance actions."""
-    query = {}
+    """Paginated audit log of all governance actions, newest first."""
+    query: dict = {}
     if invoker_id:
         query["invoker_id"] = invoker_id
     if action:
         query["action"] = action
 
-    entries = list(_audit.find(query, {"_id": 0}).sort("timestamp", -1).limit(limit))
+    entries = list(
+        _audit.find(query, {"_id": 0})
+              .sort("timestamp", -1)
+              .skip(skip)
+              .limit(limit)
+    )
     for e in entries:
         e["timestamp"] = e["timestamp"].isoformat()
     return entries

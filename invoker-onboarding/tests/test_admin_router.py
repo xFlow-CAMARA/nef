@@ -4,7 +4,6 @@ Thanks to the call-time env read in `_require_admin_key`, we don't need
 `importlib.reload`. `monkeypatch.setenv` is enough.
 """
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

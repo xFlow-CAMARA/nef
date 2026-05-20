@@ -4,7 +4,7 @@ External services (Keycloak admin API, Redis ACL pub/sub) are stubbed at the
 module level so the tests run without any other process — pure pytest in CI.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -23,7 +23,7 @@ def _seed_pending(invoker_id: str = "INV-test-1", email: str = "dev@example.com"
         "invoker_id":      invoker_id,
         "invoker_name":    "test-app",
         "approval_status": "pending",
-        "submitted_at":    datetime.now(timezone.utc),
+        "submitted_at":    datetime.now(UTC),
         "submitted_by":    {"email": email, "company": "Acme", "use_case": "demo"},
         "requested_apis":  ["sim-swap", "quality-on-demand"],
         "scopes_approved": [],
@@ -121,9 +121,62 @@ def test_audit_endpoint_returns_recent_events():
         "action":     "approved",
         "invoker_id": "INV-audit",
         "actor":      "tester",
-        "timestamp":  datetime.now(timezone.utc),
+        "timestamp":  datetime.now(UTC),
         "detail":     {"scopes_approved": ["sim-swap"]},
     })
     r = client.get("/admin/audit?invoker_id=INV-audit")
     assert r.status_code == 200
     assert r.json()[0]["action"] == "approved"
+
+
+def test_approve_rolls_back_keycloak_when_mongo_update_fails(monkeypatch):
+    """If the final Mongo write fails after Keycloak + ACL succeeded, the
+    Keycloak client and ACL entries MUST be torn down — otherwise the next
+    retry collides on 'client already exists' and we have orphan state."""
+    _seed_pending("INV-rollback")
+
+    kc_del = patch("admin_router.delete_keycloak_client").start()
+    acl_rm = patch("admin_router.remove_acl_entries").start()
+    patch("admin_router.create_keycloak_client", return_value={
+        "client_id": "INV-rollback", "client_secret": "x", "keycloak_uuid": "uuid-rb",
+    }).start()
+    patch("admin_router.create_acl_entries", return_value=["sim-swap"]).start()
+
+    # Force the Mongo update_one (the FINAL one — not the CAS claim) to raise.
+    original_update_one = db.invokers.update_one
+    call_count = {"n": 0}
+
+    def flaky_update(*args, **kwargs):
+        call_count["n"] += 1
+        # The CAS claim (first update_one) happens via find_one_and_update,
+        # so this only intercepts the final state-persist update_one.
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated mongo outage")
+        return original_update_one(*args, **kwargs)
+
+    monkeypatch.setattr(db.invokers, "update_one", flaky_update)
+
+    try:
+        r = client.post("/admin/invokers/INV-rollback/approve",
+                        json={"scopes_approved": ["sim-swap"], "approved_by": "tester"})
+    finally:
+        patch.stopall()
+
+    assert r.status_code == 503
+    kc_del.assert_called_once_with("uuid-rb")
+    acl_rm.assert_called_once_with("INV-rollback")
+    # Transient 'approving' state must be reverted to 'pending' so retry works.
+    doc = db.invokers.find_one({"invoker_id": "INV-rollback"})
+    assert doc["approval_status"] == "pending"
+
+
+def test_concurrent_approve_returns_409():
+    """The CAS claim ensures only one approve attempt can proceed at a time."""
+    _seed_pending("INV-conc")
+    # Simulate a second admin already grabbed the claim.
+    db.invokers.update_one({"invoker_id": "INV-conc"}, {"$set": {"approval_status": "approving"}})
+
+    r = client.post("/admin/invokers/INV-conc/approve",
+                    json={"scopes_approved": ["sim-swap"], "approved_by": "x"})
+    assert r.status_code == 409
+    assert "currently being approved" in r.json()["detail"]

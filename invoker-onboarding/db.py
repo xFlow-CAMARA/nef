@@ -5,11 +5,11 @@ encrypted at rest with Fernet. SAFE_PROJECTION still hides them from
 casual reads; encrypt/decrypt wrap explicit accesses.
 """
 
-import logging
-import os
 import base64
 import hashlib
-from datetime import datetime, timezone
+import logging
+import os
+from datetime import UTC, datetime
 from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -87,7 +87,7 @@ ADMIN_PROJECTION = {"secrets": 0}                  # admin-facing reads (interna
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def audit(action: str, invoker_id: str, actor: str = "system", detail: dict | None = None) -> None:

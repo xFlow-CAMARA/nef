@@ -6,8 +6,8 @@ test-only hostnames that httpx will not strip default ports from.
 """
 
 import respx
-from httpx import Response
 from fastapi.testclient import TestClient
+from httpx import Response
 
 import db
 from main import app

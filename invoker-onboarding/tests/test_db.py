@@ -3,7 +3,7 @@
 import pytest
 from cryptography.fernet import InvalidToken
 
-from db import encrypt, decrypt
+from db import decrypt, encrypt
 
 
 def test_round_trip_string():
