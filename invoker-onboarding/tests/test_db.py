@@ -1,17 +1,9 @@
-"""Unit tests for db.py — encrypt/decrypt round-trip and graceful fallback."""
+"""Unit tests for db.py — encrypt/decrypt round-trip + strict failure mode."""
 
-import os
-import sys
-import pathlib
+import pytest
+from cryptography.fernet import InvalidToken
 
-# Make the package importable when pytest is run from the repo root
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-# Force a stable dev key so the round-trip is deterministic
-os.environ.setdefault("APP_ENV", "dev")
-os.environ.setdefault("FIELD_KEY_PASSPHRASE", "unit-test-key")
-
-from db import encrypt, decrypt  # noqa: E402
+from db import encrypt, decrypt
 
 
 def test_round_trip_string():
@@ -26,13 +18,25 @@ def test_encrypt_none():
     assert decrypt(None) is None
 
 
-def test_decrypt_passthrough_on_garbage():
-    """Non-Fernet input should round-trip unchanged so legacy plaintext docs
-    survive deployment of the encryption layer."""
-    assert decrypt("not-actually-encrypted") == "not-actually-encrypted"
+def test_decrypt_invalid_raises_by_default():
+    """A garbage value must NOT silently come back as plaintext —
+    that's how stale credentials end up displayed to end users."""
+    with pytest.raises(InvalidToken):
+        decrypt("not-actually-encrypted")
+
+
+def test_decrypt_allows_plaintext_only_when_opted_in():
+    """For one-time migration off plaintext, callers may opt in."""
+    assert decrypt("legacy-plaintext", allow_plaintext_fallback=True) == "legacy-plaintext"
+
+
+def test_decrypt_fallback_still_rejects_real_ciphertext_corruption():
+    """A corrupted Fernet token (gAAAAA…) must still raise even with the
+    fallback enabled — it's clearly meant to be encrypted, just broken."""
+    with pytest.raises(InvalidToken):
+        decrypt("gAAAAAcorruptedtoken", allow_plaintext_fallback=True)
 
 
 def test_long_value_round_trip():
-    """Whole PEM-sized payloads round-trip correctly."""
     pem = "-----BEGIN RSA PRIVATE KEY-----\n" + ("x" * 2048) + "\n-----END RSA PRIVATE KEY-----"
     assert decrypt(encrypt(pem)) == pem

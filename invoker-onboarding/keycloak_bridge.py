@@ -17,26 +17,15 @@ import os
 
 import httpx
 
+from config import required
+
 log = logging.getLogger("invoker-onboarding.keycloak")
-
-APP_ENV = os.getenv("APP_ENV", "dev")
-
-
-def _required(name: str, dev_default: str) -> str:
-    val = os.getenv(name)
-    if val:
-        return val
-    if APP_ENV == "dev":
-        log.warning("%s not set — using dev default", name)
-        return dev_default
-    raise RuntimeError(f"{name} env var is required when APP_ENV != 'dev'")
-
 
 KEYCLOAK_URL      = os.getenv("KEYCLOAK_URL",   "http://keycloak:8080")
 KEYCLOAK_REALM    = os.getenv("KEYCLOAK_REALM", "camara")
 KEYCLOAK_ADMIN_ID = os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", "admin-cli")
-KEYCLOAK_ADMIN_UN = _required("KEYCLOAK_ADMIN_USERNAME", "admin")
-KEYCLOAK_ADMIN_PW = _required("KEYCLOAK_ADMIN_PASSWORD", "admin")
+KEYCLOAK_ADMIN_UN = required("KEYCLOAK_ADMIN_USERNAME", "admin")
+KEYCLOAK_ADMIN_PW = required("KEYCLOAK_ADMIN_PASSWORD", "admin")
 
 # All recognised CAMARA scopes — subset is granted at approval time
 ALL_CAMARA_SCOPES = [

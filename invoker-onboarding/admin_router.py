@@ -15,7 +15,7 @@ keep the demo self-contained.
 
 import logging
 import os
-import secrets as secrets_mod
+import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -27,22 +27,22 @@ from db import (
     audit_logs as _audit,
     audit as _audit_log,
     now as _now,
-    SAFE_PROJECTION,
+    ADMIN_PROJECTION,
     encrypt,
 )
 
 log = logging.getLogger("invoker-onboarding.admin")
 
-# When INVOKER_ADMIN_API_KEY is set, all /admin/* endpoints require
-# `X-Admin-Api-Key: <key>` header matching. When unset (dev mode), routes
-# are open — the dashboard middleware is then the only gate.
-_ADMIN_API_KEY = os.getenv("INVOKER_ADMIN_API_KEY", "")
 
-
-def _require_admin_key(x_admin_api_key: str = Header(None)):
-    if not _ADMIN_API_KEY:
-        return                       # dev mode — no enforcement
-    if not x_admin_api_key or not secrets_mod.compare_digest(x_admin_api_key, _ADMIN_API_KEY):
+def _require_admin_key(x_admin_api_key: str | None = Header(None)):
+    """Header-based gate. The expected key is read on every call so rotating
+    env at runtime (or monkeypatching in tests) takes effect immediately.
+    If INVOKER_ADMIN_API_KEY is unset, routes are open (dev mode).
+    """
+    expected = os.getenv("INVOKER_ADMIN_API_KEY", "")
+    if not expected:
+        return
+    if not x_admin_api_key or not secrets.compare_digest(x_admin_api_key, expected):
         raise HTTPException(status_code=401, detail="Admin API key missing or invalid")
 
 
@@ -118,14 +118,14 @@ def _doc_to_summary(doc: dict) -> InvokerSummary:
 def list_invokers(status: str | None = Query(None, description="Filter by approval_status")):
     """List all registered invokers, optionally filtered by status."""
     query = {"approval_status": status} if status else {}
-    docs = list(_col.find(query, SAFE_PROJECTION).sort("submitted_at", -1))
+    docs = list(_col.find(query, ADMIN_PROJECTION).sort("submitted_at", -1))
     return [_doc_to_summary(d) for d in docs]
 
 
 @router.get("/invokers/{invoker_id}", response_model=InvokerDetail)
 def get_invoker_detail(invoker_id: str):
     """Full invoker detail including audit history."""
-    doc = _col.find_one({"invoker_id": invoker_id}, SAFE_PROJECTION)
+    doc = _col.find_one({"invoker_id": invoker_id}, ADMIN_PROJECTION)
     if not doc:
         raise HTTPException(404, f"Invoker {invoker_id} not found")
 
@@ -199,15 +199,15 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     _col.update_one(
         {"invoker_id": invoker_id},
         {"$set": {
-            "approval_status":      "approved",
-            "scopes_approved":      req.scopes_approved,
-            "approved_at":          now,
-            "approved_by":          req.approved_by,
-            "rejection_reason":     None,
-            "keycloak_client_id":   kc["client_id"],
-            "secrets.keycloak_uuid":   kc["keycloak_uuid"],
+            "approval_status":         "approved",
+            "scopes_approved":         req.scopes_approved,
+            "approved_at":             now,
+            "approved_by":             req.approved_by,
+            "rejection_reason":        None,
+            "keycloak_client_id":      kc["client_id"],
             "secrets.keycloak_secret": encrypt(kc["client_secret"]),
-            "secrets.acl_published":   acl_published,
+            "internal.keycloak_uuid":  kc["keycloak_uuid"],
+            "internal.acl_published":  acl_published,
         }},
     )
     _audit_log(
@@ -283,7 +283,7 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
     if doc["approval_status"] != "approved":
         raise HTTPException(409, f"Only approved invokers can be revoked (current: {doc['approval_status']})")
 
-    kc_uuid = (doc.get("secrets") or {}).get("keycloak_uuid")
+    kc_uuid = (doc.get("internal") or {}).get("keycloak_uuid")
     if kc_uuid:
         delete_keycloak_client(kc_uuid)
 
@@ -295,8 +295,8 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
         {"$set": {
             "approval_status":         "suspended",
             "keycloak_client_id":      None,
-            "secrets.keycloak_uuid":   None,
             "secrets.keycloak_secret": None,
+            "internal.keycloak_uuid":  None,
             "suspended_at":       _now(),
             "suspended_by":       req.revoked_by,
         }},

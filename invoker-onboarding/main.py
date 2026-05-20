@@ -37,8 +37,10 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+import secrets as _secrets
+
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from cryptography import x509
@@ -48,37 +50,24 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from db import (
     invokers as _col,
-    audit_logs as _audit,
     audit as _audit_log,
     now as _now,
     SAFE_PROJECTION,
     encrypt,
     decrypt,
 )
+from config import required, assert_dev_is_local
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("invoker-onboarding")
 
-# In production every secret MUST come from env. In APP_ENV=dev we fall back to
-# the demo values used by the docker-compose stack so a fresh `docker compose up`
-# still works without ceremony.
-APP_ENV = os.getenv("APP_ENV", "dev")
-
-
-def _required(name: str, dev_default: str) -> str:
-    val = os.getenv(name)
-    if val:
-        return val
-    if APP_ENV == "dev":
-        log.warning("%s not set — using dev default", name)
-        return dev_default
-    raise RuntimeError(f"{name} env var is required when APP_ENV != 'dev'")
-
+# Fail fast if APP_ENV=dev is paired with non-local upstreams.
+assert_dev_is_local()
 
 CAPIF_CORE_URL     = os.getenv("CAPIF_CORE_URL",     "https://capifcore:443")
 CAPIF_REGISTER_URL = os.getenv("CAPIF_REGISTER_URL", "https://register:8080")
-CAPIF_USERNAME     = _required("CAPIF_USERNAME", "nef-xflow")
-CAPIF_PASSWORD     = _required("CAPIF_PASSWORD", "xflow-nef-2026")
+CAPIF_USERNAME     = required("CAPIF_USERNAME", "nef-xflow")
+CAPIF_PASSWORD     = required("CAPIF_PASSWORD", "xflow-nef-2026")
 CAPIF_SERVICE_URL  = os.getenv("CAPIF_SERVICE_URL",  "http://capif-service:8080")
 
 # TLS verification of outbound calls. Default to verifying; only disable
@@ -101,6 +90,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _require_dev_key(x_dev_api_key: str | None = Header(None)) -> None:
+    """Optional gate for /invokers/* developer endpoints.
+    When INVOKER_DEV_API_KEY is set, the dashboard (and only the dashboard)
+    must include it. Unset means dev mode — open to anyone on the network.
+    Read on every call so rotation/tests work without import-time gymnastics.
+    """
+    expected = os.getenv("INVOKER_DEV_API_KEY", "")
+    if not expected:
+        return
+    if not x_dev_api_key or not _secrets.compare_digest(x_dev_api_key, expected):
+        raise HTTPException(status_code=401, detail="Developer API key missing or invalid")
 
 
 # ── CAPIF helpers ──────────────────────────────────────────────────────────────
@@ -224,7 +226,8 @@ def discover_apis():
     return {"apis": entries, "capif_core": CAPIF_CORE_URL}
 
 
-@app.post("/invokers", response_model=OnboardResponse, status_code=201)
+@app.post("/invokers", response_model=OnboardResponse, status_code=201,
+          dependencies=[Depends(_require_dev_key)])
 def submit_registration(req: OnboardRequest):
     """
     Submit a new invoker registration request.
@@ -319,8 +322,10 @@ def submit_registration(req: OnboardRequest):
         "secrets": {
             "key_pem":       encrypt(key_pem),
             "cert_pem":      encrypt(cert_pem),
-            "client_id":     client_id,                # not sensitive (it's the invoker_id)
             "client_secret": encrypt(client_secret),
+        },
+        "internal": {
+            "client_id": client_id,
         },
     }
     _col.insert_one(doc)
@@ -339,7 +344,8 @@ def submit_registration(req: OnboardRequest):
     )
 
 
-@app.get("/invokers/{invoker_id}/credentials")
+@app.get("/invokers/{invoker_id}/credentials",
+         dependencies=[Depends(_require_dev_key)])
 def get_invoker_credentials(invoker_id: str):
     """Return the Keycloak client_id + secret for an approved invoker.
 
@@ -351,14 +357,16 @@ def get_invoker_credentials(invoker_id: str):
     if doc.get("approval_status") != "approved":
         raise HTTPException(403, "Credentials only available for approved invokers")
 
+    encrypted = (doc.get("secrets") or {}).get("keycloak_secret")
     return {
         "keycloak_client_id": doc.get("keycloak_client_id"),
-        "keycloak_secret":    decrypt((doc.get("secrets") or {}).get("keycloak_secret")),
+        "keycloak_secret":    decrypt(encrypted) if encrypted else None,
         "scopes_approved":    doc.get("scopes_approved", []),
     }
 
 
-@app.get("/invokers/by-email/{email}", response_model=list[InvokerStatus])
+@app.get("/invokers/by-email/{email}", response_model=list[InvokerStatus],
+         dependencies=[Depends(_require_dev_key)])
 def list_invokers_by_email(email: str):
     """List all invokers submitted by a given developer email (oldest last)."""
     docs = list(
