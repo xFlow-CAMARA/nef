@@ -19,11 +19,24 @@ import httpx
 
 log = logging.getLogger("invoker-onboarding.keycloak")
 
-KEYCLOAK_URL      = os.getenv("KEYCLOAK_URL",      "http://keycloak:8080")
-KEYCLOAK_REALM    = os.getenv("KEYCLOAK_REALM",    "camara")
-KEYCLOAK_ADMIN_ID = os.getenv("KEYCLOAK_ADMIN_CLIENT_ID",     "admin-cli")
-KEYCLOAK_ADMIN_UN = os.getenv("KEYCLOAK_ADMIN_USERNAME",      "admin")
-KEYCLOAK_ADMIN_PW = os.getenv("KEYCLOAK_ADMIN_PASSWORD",      "admin")
+APP_ENV = os.getenv("APP_ENV", "dev")
+
+
+def _required(name: str, dev_default: str) -> str:
+    val = os.getenv(name)
+    if val:
+        return val
+    if APP_ENV == "dev":
+        log.warning("%s not set — using dev default", name)
+        return dev_default
+    raise RuntimeError(f"{name} env var is required when APP_ENV != 'dev'")
+
+
+KEYCLOAK_URL      = os.getenv("KEYCLOAK_URL",   "http://keycloak:8080")
+KEYCLOAK_REALM    = os.getenv("KEYCLOAK_REALM", "camara")
+KEYCLOAK_ADMIN_ID = os.getenv("KEYCLOAK_ADMIN_CLIENT_ID", "admin-cli")
+KEYCLOAK_ADMIN_UN = _required("KEYCLOAK_ADMIN_USERNAME", "admin")
+KEYCLOAK_ADMIN_PW = _required("KEYCLOAK_ADMIN_PASSWORD", "admin")
 
 # All recognised CAMARA scopes — subset is granted at approval time
 ALL_CAMARA_SCOPES = [
@@ -175,41 +188,3 @@ def delete_keycloak_client(keycloak_uuid: str) -> None:
         log.error("Error deleting Keycloak client %s: %s", keycloak_uuid, e)
 
 
-def update_keycloak_client_scopes(keycloak_uuid: str, approved_scopes: list[str]) -> None:
-    """Update the optional client scopes for an existing Keycloak client."""
-    try:
-        admin_token = _admin_token()
-        headers = {"Authorization": f"Bearer {admin_token}"}
-
-        # Fetch current optional scopes
-        cur_r = _http.get(
-            f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}/clients/{keycloak_uuid}/optional-client-scopes",
-            headers=headers,
-        )
-        cur_r.raise_for_status()
-        existing = {s["id"] for s in cur_r.json()}
-
-        # Resolve desired scope UUIDs
-        desired = set()
-        for scope in approved_scopes:
-            uid = _scope_uuid(admin_token, scope)
-            if uid:
-                desired.add(uid)
-
-        # Add missing
-        for sid in desired - existing:
-            _http.put(
-                f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}/clients/{keycloak_uuid}/optional-client-scopes/{sid}",
-                headers=headers,
-            )
-
-        # Remove revoked
-        for sid in existing - desired:
-            _http.delete(
-                f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}/clients/{keycloak_uuid}/optional-client-scopes/{sid}",
-                headers=headers,
-            )
-
-        log.info("Updated scopes for Keycloak client %s → %s", keycloak_uuid, approved_scopes)
-    except Exception as e:
-        log.error("Error updating Keycloak client scopes for %s: %s", keycloak_uuid, e)

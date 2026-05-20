@@ -13,53 +13,48 @@ keep the demo self-contained.
   GET  /admin/audit                       paginated audit log
 """
 
-import datetime
 import logging
-
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-from typing import List, Optional
-from pymongo import MongoClient
 import os
+import secrets as secrets_mod
 
-from keycloak_bridge import (
-    create_keycloak_client,
-    delete_keycloak_client,
-    update_keycloak_client_scopes,
-)
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from pydantic import BaseModel
+
+from keycloak_bridge import create_keycloak_client, delete_keycloak_client
 from acl_bridge import create_acl_entries, remove_acl_entries
+from db import (
+    invokers as _col,
+    audit_logs as _audit,
+    audit as _audit_log,
+    now as _now,
+    SAFE_PROJECTION,
+    encrypt,
+)
 
 log = logging.getLogger("invoker-onboarding.admin")
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://camara-mongodb:27017/camara")
-_mongo      = MongoClient(MONGODB_URI)
-_db         = _mongo.get_default_database()
-_col        = _db["invokers"]
-_audit      = _db["audit_logs"]
-
-router = APIRouter()
+# When INVOKER_ADMIN_API_KEY is set, all /admin/* endpoints require
+# `X-Admin-Api-Key: <key>` header matching. When unset (dev mode), routes
+# are open — the dashboard middleware is then the only gate.
+_ADMIN_API_KEY = os.getenv("INVOKER_ADMIN_API_KEY", "")
 
 
-def _now() -> datetime.datetime:
-    return datetime.datetime.utcnow()
+def _require_admin_key(x_admin_api_key: str = Header(None)):
+    if not _ADMIN_API_KEY:
+        return                       # dev mode — no enforcement
+    if not x_admin_api_key or not secrets_mod.compare_digest(x_admin_api_key, _ADMIN_API_KEY):
+        raise HTTPException(status_code=401, detail="Admin API key missing or invalid")
 
 
-def _audit_log(action: str, invoker_id: str, actor: str = "admin", detail: dict = None):
-    _audit.insert_one({
-        "action":     action,
-        "invoker_id": invoker_id,
-        "actor":      actor,
-        "timestamp":  _now(),
-        "detail":     detail or {},
-    })
+router = APIRouter(dependencies=[Depends(_require_admin_key)])
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 class ApproveRequest(BaseModel):
-    scopes_approved: List[str]          # subset of CAMARA API names to grant
+    scopes_approved: list[str]          # subset of CAMARA API names to grant
     approved_by:     str = "admin"      # admin username or email
-    note:            Optional[str] = None
+    note:            str | None = None
 
 
 class RejectRequest(BaseModel):
@@ -77,21 +72,21 @@ class InvokerSummary(BaseModel):
     invoker_name:    str
     approval_status: str
     submitted_at:    str
-    contact_email:   Optional[str] = None
-    company:         Optional[str] = None
-    requested_apis:  Optional[List[str]] = None
-    scopes_approved: Optional[List[str]] = None
+    contact_email:   str | None = None
+    company:         str | None = None
+    requested_apis:  list[str] = []
+    scopes_approved: list[str] = []
 
 
 class InvokerDetail(InvokerSummary):
-    description:       Optional[str] = None
-    use_case:          Optional[str] = None
-    notification_url:  Optional[str] = None
-    approved_at:       Optional[str] = None
-    approved_by:       Optional[str] = None
-    rejection_reason:  Optional[str] = None
-    keycloak_client_id: Optional[str] = None
-    audit_history:     Optional[List[dict]] = None
+    description:       str | None = None
+    use_case:          str | None = None
+    notification_url:  str | None = None
+    approved_at:       str | None = None
+    approved_by:       str | None = None
+    rejection_reason:  str | None = None
+    keycloak_client_id: str | None = None
+    audit_history:     list[dict] = []
 
 
 class AuditEntry(BaseModel):
@@ -119,26 +114,18 @@ def _doc_to_summary(doc: dict) -> InvokerSummary:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-@router.get("/invokers", response_model=List[InvokerSummary])
-def list_invokers(status: Optional[str] = Query(None, description="Filter by approval_status")):
+@router.get("/invokers", response_model=list[InvokerSummary])
+def list_invokers(status: str | None = Query(None, description="Filter by approval_status")):
     """List all registered invokers, optionally filtered by status."""
-    query = {}
-    if status:
-        query["approval_status"] = status
-
-    # Exclude sensitive credential fields
-    projection = {"_key_pem": 0, "_cert_pem": 0, "_client_secret": 0}
-    docs = list(_col.find(query, projection).sort("submitted_at", -1))
+    query = {"approval_status": status} if status else {}
+    docs = list(_col.find(query, SAFE_PROJECTION).sort("submitted_at", -1))
     return [_doc_to_summary(d) for d in docs]
 
 
 @router.get("/invokers/{invoker_id}", response_model=InvokerDetail)
 def get_invoker_detail(invoker_id: str):
     """Full invoker detail including audit history."""
-    doc = _col.find_one(
-        {"invoker_id": invoker_id},
-        {"_key_pem": 0, "_cert_pem": 0, "_client_secret": 0},
-    )
+    doc = _col.find_one({"invoker_id": invoker_id}, SAFE_PROJECTION)
     if not doc:
         raise HTTPException(404, f"Invoker {invoker_id} not found")
 
@@ -212,15 +199,15 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     _col.update_one(
         {"invoker_id": invoker_id},
         {"$set": {
-            "approval_status":    "approved",
-            "scopes_approved":    req.scopes_approved,
-            "approved_at":        now,
-            "approved_by":        req.approved_by,
-            "rejection_reason":   None,
-            "keycloak_client_id": kc["client_id"],
-            "_keycloak_uuid":     kc["keycloak_uuid"],
-            "_keycloak_secret":   kc["client_secret"],
-            "_acl_published":     acl_published,
+            "approval_status":      "approved",
+            "scopes_approved":      req.scopes_approved,
+            "approved_at":          now,
+            "approved_by":          req.approved_by,
+            "rejection_reason":     None,
+            "keycloak_client_id":   kc["client_id"],
+            "secrets.keycloak_uuid":   kc["keycloak_uuid"],
+            "secrets.keycloak_secret": encrypt(kc["client_secret"]),
+            "secrets.acl_published":   acl_published,
         }},
     )
     _audit_log(
@@ -296,7 +283,7 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
     if doc["approval_status"] != "approved":
         raise HTTPException(409, f"Only approved invokers can be revoked (current: {doc['approval_status']})")
 
-    kc_uuid = doc.get("_keycloak_uuid")
+    kc_uuid = (doc.get("secrets") or {}).get("keycloak_uuid")
     if kc_uuid:
         delete_keycloak_client(kc_uuid)
 
@@ -306,10 +293,10 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
     _col.update_one(
         {"invoker_id": invoker_id},
         {"$set": {
-            "approval_status":    "suspended",
-            "keycloak_client_id": None,
-            "_keycloak_uuid":     None,
-            "_keycloak_secret":   None,
+            "approval_status":         "suspended",
+            "keycloak_client_id":      None,
+            "secrets.keycloak_uuid":   None,
+            "secrets.keycloak_secret": None,
             "suspended_at":       _now(),
             "suspended_by":       req.revoked_by,
         }},
@@ -328,11 +315,11 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
     }
 
 
-@router.get("/audit", response_model=List[AuditEntry])
+@router.get("/audit", response_model=list[AuditEntry])
 def get_audit_log(
-    invoker_id: Optional[str] = Query(None),
-    action:     Optional[str] = Query(None),
-    limit:      int           = Query(100, le=500),
+    invoker_id: str | None = Query(None),
+    action:     str | None = Query(None),
+    limit:      int        = Query(100, le=500),
 ):
     """Paginated audit log of all governance actions."""
     query = {}

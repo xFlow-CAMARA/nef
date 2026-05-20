@@ -5,3 +5,8 @@ pydantic==2.8.2
 cryptography==43.0.1
 pymongo==4.8.0
 redis==5.0.8
+
+# Test deps (kept light so the production image isn't bloated; CI installs them)
+pytest==8.3.3
+mongomock==4.3.0
+respx==0.21.1

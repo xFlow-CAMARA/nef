@@ -32,52 +32,60 @@ MONGODB_URI         MongoDB connection string (default: mongodb://camara-mongodb
 
 import os
 import logging
-import datetime
 import secrets
 import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Optional
-from pymongo import MongoClient
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from db import (
+    invokers as _col,
+    audit_logs as _audit,
+    audit as _audit_log,
+    now as _now,
+    SAFE_PROJECTION,
+    encrypt,
+    decrypt,
+)
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("invoker-onboarding")
 
+# In production every secret MUST come from env. In APP_ENV=dev we fall back to
+# the demo values used by the docker-compose stack so a fresh `docker compose up`
+# still works without ceremony.
+APP_ENV = os.getenv("APP_ENV", "dev")
+
+
+def _required(name: str, dev_default: str) -> str:
+    val = os.getenv(name)
+    if val:
+        return val
+    if APP_ENV == "dev":
+        log.warning("%s not set — using dev default", name)
+        return dev_default
+    raise RuntimeError(f"{name} env var is required when APP_ENV != 'dev'")
+
+
 CAPIF_CORE_URL     = os.getenv("CAPIF_CORE_URL",     "https://capifcore:443")
 CAPIF_REGISTER_URL = os.getenv("CAPIF_REGISTER_URL", "https://register:8080")
-CAPIF_USERNAME     = os.getenv("CAPIF_USERNAME",     "nef-xflow")
-CAPIF_PASSWORD     = os.getenv("CAPIF_PASSWORD",     "xflow-nef-2026")
+CAPIF_USERNAME     = _required("CAPIF_USERNAME", "nef-xflow")
+CAPIF_PASSWORD     = _required("CAPIF_PASSWORD", "xflow-nef-2026")
 CAPIF_SERVICE_URL  = os.getenv("CAPIF_SERVICE_URL",  "http://capif-service:8080")
-MONGODB_URI        = os.getenv("MONGODB_URI",        "mongodb://camara-mongodb:27017/camara")
 
-_http = httpx.Client(verify=False, timeout=15.0)
-
-# ── MongoDB ────────────────────────────────────────────────────────────────────
-_mongo  = MongoClient(MONGODB_URI)
-_db     = _mongo.get_default_database()
-_col    = _db["invokers"]      # developer portal collection
-_audit  = _db["audit_logs"]
-
-
-def _now() -> datetime.datetime:
-    return datetime.datetime.utcnow()
-
-
-def _audit_log(action: str, invoker_id: str, actor: str = "system", detail: dict = None):
-    _audit.insert_one({
-        "action":     action,
-        "invoker_id": invoker_id,
-        "actor":      actor,
-        "timestamp":  _now(),
-        "detail":     detail or {},
-    })
+# TLS verification of outbound calls. Default to verifying; only disable
+# explicitly via env when talking to OpenCAPIF's self-signed certs in dev.
+_CA_BUNDLE = os.getenv("CAPIF_CA_BUNDLE")          # path to a CA file
+_VERIFY    = os.getenv("CAPIF_TLS_VERIFY", "true").lower() not in ("0", "false", "no")
+_http = httpx.Client(verify=_CA_BUNDLE if _CA_BUNDLE else _VERIFY, timeout=15.0)
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -118,14 +126,26 @@ def _capif_post(path: str, body: dict, token: str) -> dict:
     return r.json()
 
 
-def _mtls_client(cert_pem: str, key_pem: str) -> httpx.Client:
-    with tempfile.NamedTemporaryFile(suffix=".pem", delete=False, mode="w") as cf:
-        cf.write(cert_pem)
-        cert_path = cf.name
-    with tempfile.NamedTemporaryFile(suffix=".key", delete=False, mode="w") as kf:
-        kf.write(key_pem)
-        key_path = kf.name
-    return httpx.Client(cert=(cert_path, key_path), verify=False, timeout=15.0)
+@contextmanager
+def _mtls_client(cert_pem: str, key_pem: str):
+    """
+    Yield an httpx.Client configured with the invoker's mTLS cert.
+    Tempfiles holding the PEM bytes and the client itself are torn down
+    when the context exits so we don't leak FDs or leave keys in /tmp.
+    """
+    cf = tempfile.NamedTemporaryFile(suffix=".pem", mode="w", delete=False)
+    kf = tempfile.NamedTemporaryFile(suffix=".key", mode="w", delete=False)
+    try:
+        cf.write(cert_pem); cf.flush(); cf.close()
+        kf.write(key_pem);  kf.flush(); kf.close()
+        with httpx.Client(cert=(cf.name, kf.name), verify=False, timeout=15.0) as client:
+            yield client
+    finally:
+        for p in (cf.name, kf.name):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 def _generate_key_and_csr(common_name: str):
@@ -148,13 +168,13 @@ def _generate_key_and_csr(common_name: str):
 
 class OnboardRequest(BaseModel):
     invoker_name:     str
-    description:      Optional[str] = ""
-    notification_url: Optional[str] = "http://localhost/capif-callback"
+    description:      str | None = ""
+    notification_url: str | None = "http://localhost/capif-callback"
     # Developer identity — stored for admin review
-    contact_email:    Optional[str] = ""
-    company:          Optional[str] = ""
-    use_case:         Optional[str] = ""
-    requested_apis:   Optional[List[str]] = []   # e.g. ["quality-on-demand", "location-retrieval"]
+    contact_email:    str | None = ""
+    company:          str | None = ""
+    use_case:         str | None = ""
+    requested_apis:   list[str] = []   # e.g. ["quality-on-demand", "location-retrieval"]
 
 
 class OnboardResponse(BaseModel):
@@ -176,14 +196,14 @@ class TokenResponse(BaseModel):
 
 
 class InvokerStatus(BaseModel):
-    invoker_id:      str
-    invoker_name:    str
-    approval_status: str
-    submitted_at:    str
-    approved_at:     Optional[str] = None
-    rejection_reason: Optional[str] = None
-    scopes_approved: Optional[List[str]] = None
-    keycloak_client_id: Optional[str] = None
+    invoker_id:         str
+    invoker_name:       str
+    approval_status:    str
+    submitted_at:       str
+    approved_at:        str | None = None
+    rejection_reason:   str | None = None
+    scopes_approved:    list[str] = []
+    keycloak_client_id: str | None = None
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -237,14 +257,19 @@ def submit_registration(req: OnboardRequest):
     if not cert_pem:
         raise HTTPException(500, "CAPIF did not return a signed certificate")
 
-    # Register mTLS security context
+    # Register mTLS security context.
+    # Catalog lookup is best-effort: if capif-service is unreachable we skip
+    # the security context (the invoker can still register and be approved;
+    # they just won't have a pre-built ACL until the catalog comes back).
     catalog_entries = []
     try:
         cat_r = _http.get(f"{CAPIF_SERVICE_URL}/catalog", timeout=5.0)
         if cat_r.status_code == 200:
             catalog_entries = cat_r.json()
-    except Exception:
-        pass
+        else:
+            log.warning("CAPIF catalog returned %d; skipping security context", cat_r.status_code)
+    except Exception as e:
+        log.warning("CAPIF catalog unreachable (%s); skipping security context", e)
 
     if catalog_entries:
         security_info = [
@@ -257,19 +282,22 @@ def submit_registration(req: OnboardRequest):
             }
             for entry in catalog_entries
         ]
-        mtls = _mtls_client(cert_pem, key_pem)
-        sec_r = mtls.put(
-            f"{CAPIF_CORE_URL}/capif-security/v1/trustedInvokers/{invoker_id}",
-            json={
-                "securityInfo":           security_info,
-                "notificationDestination": req.notification_url,
-                "supportedFeatures":      "0",
-            },
-        )
-        if sec_r.status_code not in (200, 201):
-            log.warning("Security context registration returned %d", sec_r.status_code)
+        with _mtls_client(cert_pem, key_pem) as mtls:
+            sec_r = mtls.put(
+                f"{CAPIF_CORE_URL}/capif-security/v1/trustedInvokers/{invoker_id}",
+                json={
+                    "securityInfo":           security_info,
+                    "notificationDestination": req.notification_url,
+                    "supportedFeatures":      "0",
+                },
+            )
+            if sec_r.status_code not in (200, 201):
+                log.warning("Security context registration returned %d", sec_r.status_code)
 
-    # Persist to MongoDB — status starts as 'pending'
+    # Persist to MongoDB — status starts as 'pending'.
+    # All sensitive material lives under .secrets so the SAFE_PROJECTION
+    # (defined in db.py) keeps it out of every developer-facing response
+    # by default — no per-call field list to forget.
     doc = {
         "invoker_id":      invoker_id,
         "invoker_name":    req.invoker_name,
@@ -288,11 +316,12 @@ def submit_registration(req: OnboardRequest):
         "approved_by":       None,
         "rejection_reason":  None,
         "keycloak_client_id": None,
-        # CAPIF mTLS credentials (needed for token requests)
-        "_key_pem":          key_pem,
-        "_cert_pem":         cert_pem,
-        "_client_id":        client_id,
-        "_client_secret":    client_secret,
+        "secrets": {
+            "key_pem":       encrypt(key_pem),
+            "cert_pem":      encrypt(cert_pem),
+            "client_id":     client_id,                # not sensitive (it's the invoker_id)
+            "client_secret": encrypt(client_secret),
+        },
     }
     _col.insert_one(doc)
     _audit_log("submitted", invoker_id, actor=req.contact_email or "anonymous",
@@ -324,19 +353,16 @@ def get_invoker_credentials(invoker_id: str):
 
     return {
         "keycloak_client_id": doc.get("keycloak_client_id"),
-        "keycloak_secret":    doc.get("_keycloak_secret"),
+        "keycloak_secret":    decrypt((doc.get("secrets") or {}).get("keycloak_secret")),
         "scopes_approved":    doc.get("scopes_approved", []),
     }
 
 
-@app.get("/invokers/by-email/{email}", response_model=List[InvokerStatus])
+@app.get("/invokers/by-email/{email}", response_model=list[InvokerStatus])
 def list_invokers_by_email(email: str):
     """List all invokers submitted by a given developer email (oldest last)."""
     docs = list(
-        _col.find(
-            {"submitted_by.email": email},
-            {"_key_pem": 0, "_cert_pem": 0, "_client_secret": 0, "_keycloak_secret": 0},
-        ).sort("submitted_at", -1)
+        _col.find({"submitted_by.email": email}, SAFE_PROJECTION).sort("submitted_at", -1)
     )
     return [
         InvokerStatus(
@@ -356,7 +382,7 @@ def list_invokers_by_email(email: str):
 @app.get("/invokers/{invoker_id}", response_model=InvokerStatus)
 def get_invoker_status(invoker_id: str):
     """Check the approval status of a registration request."""
-    doc = _col.find_one({"invoker_id": invoker_id}, {"_key_pem": 0, "_cert_pem": 0, "_client_secret": 0})
+    doc = _col.find_one({"invoker_id": invoker_id}, SAFE_PROJECTION)
     if not doc:
         raise HTTPException(404, f"Invoker {invoker_id} not found")
 
@@ -392,17 +418,17 @@ def get_token(invoker_id: str, req: TokenRequest):
     if doc["approval_status"] == "suspended":
         raise HTTPException(403, "Invoker access has been suspended by the operator")
 
-    mtls = _mtls_client(doc["_cert_pem"], doc["_key_pem"])
-    r = mtls.post(
-        f"{CAPIF_CORE_URL}/capif-security/v1/securities/{invoker_id}/token",
-        data={
-            "grant_type":    "client_credentials",
-            "client_id":     invoker_id,
-            "client_secret": req.client_secret,
-            "scope":         req.scope,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
+    with _mtls_client(decrypt(doc["secrets"]["cert_pem"]), decrypt(doc["secrets"]["key_pem"])) as mtls:
+        r = mtls.post(
+            f"{CAPIF_CORE_URL}/capif-security/v1/securities/{invoker_id}/token",
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     invoker_id,
+                "client_secret": req.client_secret,
+                "scope":         req.scope,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
 
     if r.status_code != 200:
         log.error("Token request failed %d: %s", r.status_code, r.text)
