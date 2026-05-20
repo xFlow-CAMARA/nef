@@ -1,30 +1,32 @@
 """Shared pytest fixtures.
 
-Two responsibilities:
-  1. Make the `invoker-onboarding/` package importable from anywhere.
-  2. Swap the real Mongo client for `mongomock` once, before any test
-     module imports `db` or `admin_router`.
+Mongo swap happens at *conftest import time* so any test-module-level
+import of `db` / `admin_router` / `main` picks up the in-memory client
+before binding their own references.
 """
 
 import os
 import sys
 import pathlib
 
+import mongomock
+import pytest
+
 # Make modules importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-# Set a stable dev field key before any module reads it
+# Test env vars must be set before importing `db` (which reads FIELD_KEY at
+# first encrypt/decrypt call via @lru_cache, but APP_ENV is read at module
+# load). Use os.environ.setdefault so a CI runner that pre-sets these wins.
 os.environ.setdefault("APP_ENV", "dev")
 os.environ.setdefault("FIELD_KEY_PASSPHRASE", "unit-test-key")
 
-import mongomock                                # noqa: E402
-import pytest                                   # noqa: E402
-
 import db                                       # noqa: E402
 
-# Replace the real MongoClient connection with an in-memory one
-_fake_client = mongomock.MongoClient()
-db._db        = _fake_client.get_database("camara")
+# In-memory Mongo for the whole test session. Must happen BEFORE any test
+# module imports admin_router / main (those bind `db.invokers` at import).
+_fake = mongomock.MongoClient()
+db._db        = _fake.get_database("camara")
 db.invokers   = db._db["invokers"]
 db.audit_logs = db._db["audit_logs"]
 

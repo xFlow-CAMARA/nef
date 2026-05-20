@@ -37,8 +37,6 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-import secrets as _secrets
-
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +55,7 @@ from db import (
     decrypt,
 )
 from config import required, assert_dev_is_local
+from admin_router import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("invoker-onboarding")
@@ -92,6 +91,30 @@ app.add_middleware(
 )
 
 
+@app.on_event("shutdown")
+def _shutdown_clients() -> None:
+    """Tidy up module-level singletons on graceful shutdown so upstreams
+    don't see half-open connections."""
+    try:
+        _http.close()
+    except Exception:
+        pass
+    # acl_bridge holds its own redis client; close it if it was opened.
+    try:
+        import acl_bridge
+        if acl_bridge._redis is not None:
+            acl_bridge._redis.close()
+            acl_bridge._redis = None
+    except Exception:
+        pass
+    # keycloak_bridge's httpx client.
+    try:
+        import keycloak_bridge
+        keycloak_bridge._http.close()
+    except Exception:
+        pass
+
+
 def _require_dev_key(x_dev_api_key: str | None = Header(None)) -> None:
     """Optional gate for /invokers/* developer endpoints.
     When INVOKER_DEV_API_KEY is set, the dashboard (and only the dashboard)
@@ -101,8 +124,18 @@ def _require_dev_key(x_dev_api_key: str | None = Header(None)) -> None:
     expected = os.getenv("INVOKER_DEV_API_KEY", "")
     if not expected:
         return
-    if not x_dev_api_key or not _secrets.compare_digest(x_dev_api_key, expected):
+    if not x_dev_api_key or not secrets.compare_digest(x_dev_api_key, expected):
         raise HTTPException(status_code=401, detail="Developer API key missing or invalid")
+
+
+def _require_admin_key(x_admin_api_key: str | None = Header(None)) -> None:
+    """Same shape as the admin_router gate — used here for destructive ops
+    on root-level routes (e.g. DELETE /invokers/{id})."""
+    expected = os.getenv("INVOKER_ADMIN_API_KEY", "")
+    if not expected:
+        return
+    if not x_admin_api_key or not secrets.compare_digest(x_admin_api_key, expected):
+        raise HTTPException(status_code=401, detail="Admin API key missing or invalid")
 
 
 # ── CAPIF helpers ──────────────────────────────────────────────────────────────
@@ -170,12 +203,12 @@ def _generate_key_and_csr(common_name: str):
 
 class OnboardRequest(BaseModel):
     invoker_name:     str
-    description:      str | None = ""
+    description:      str | None = None
     notification_url: str | None = "http://localhost/capif-callback"
     # Developer identity — stored for admin review
-    contact_email:    str | None = ""
-    company:          str | None = ""
-    use_case:         str | None = ""
+    contact_email:    str | None = None
+    company:          str | None = None
+    use_case:         str | None = None
     requested_apis:   list[str] = []   # e.g. ["quality-on-demand", "location-retrieval"]
 
 
@@ -215,7 +248,7 @@ def health():
     return {"status": "ok", "service": "invoker-onboarding", "version": "2.0.0"}
 
 
-@app.get("/apis")
+@app.get("/apis", dependencies=[Depends(_require_dev_key)])
 def discover_apis():
     try:
         r = _http.get(f"{CAPIF_SERVICE_URL}/catalog", timeout=10.0)
@@ -346,10 +379,12 @@ def submit_registration(req: OnboardRequest):
 
 @app.get("/invokers/{invoker_id}/credentials",
          dependencies=[Depends(_require_dev_key)])
-def get_invoker_credentials(invoker_id: str):
+def get_invoker_credentials(invoker_id: str, x_actor: str | None = Header(None)):
     """Return the Keycloak client_id + secret for an approved invoker.
 
-    Used by the developer portal so developers don't need to save the secret themselves.
+    Every reveal is recorded in the audit log so disclosure is never silent.
+    The dashboard injects the authenticated user as `X-Actor` (developer email
+    or admin email). Unset → "unknown".
     """
     doc = _col.find_one({"invoker_id": invoker_id})
     if not doc:
@@ -358,9 +393,19 @@ def get_invoker_credentials(invoker_id: str):
         raise HTTPException(403, "Credentials only available for approved invokers")
 
     encrypted = (doc.get("secrets") or {}).get("keycloak_secret")
+    secret = None
+    if encrypted:
+        try:
+            secret = decrypt(encrypted)
+        except Exception:
+            log.error("Could not decrypt stored secret for %s — key rotated?", invoker_id)
+            raise HTTPException(503, "Stored credentials unreadable — contact operator")
+
+    _audit_log("credentials_revealed", invoker_id, actor=x_actor or "unknown")
+
     return {
         "keycloak_client_id": doc.get("keycloak_client_id"),
-        "keycloak_secret":    decrypt(encrypted) if encrypted else None,
+        "keycloak_secret":    secret,
         "scopes_approved":    doc.get("scopes_approved", []),
     }
 
@@ -406,7 +451,8 @@ def get_invoker_status(invoker_id: str):
     )
 
 
-@app.post("/invokers/{invoker_id}/token", response_model=TokenResponse)
+@app.post("/invokers/{invoker_id}/token", response_model=TokenResponse,
+          dependencies=[Depends(_require_dev_key)])
 def get_token(invoker_id: str, req: TokenRequest):
     """
     Exchange client credentials for a CAPIF-issued JWT.
@@ -426,7 +472,13 @@ def get_token(invoker_id: str, req: TokenRequest):
     if doc["approval_status"] == "suspended":
         raise HTTPException(403, "Invoker access has been suspended by the operator")
 
-    with _mtls_client(decrypt(doc["secrets"]["cert_pem"]), decrypt(doc["secrets"]["key_pem"])) as mtls:
+    try:
+        cert_pem = decrypt(doc["secrets"]["cert_pem"])
+        key_pem  = decrypt(doc["secrets"]["key_pem"])
+    except Exception:
+        log.error("Could not decrypt stored mTLS material for %s — FIELD_KEY rotated?", invoker_id)
+        raise HTTPException(503, "Stored credentials unreadable — contact operator")
+    with _mtls_client(cert_pem, key_pem) as mtls:
         r = mtls.post(
             f"{CAPIF_CORE_URL}/capif-security/v1/securities/{invoker_id}/token",
             data={
@@ -451,9 +503,10 @@ def get_token(invoker_id: str, req: TokenRequest):
     )
 
 
-@app.delete("/invokers/{invoker_id}", status_code=204)
-def offboard_invoker(invoker_id: str):
-    """Remove an invoker from CAPIF and the portal."""
+@app.delete("/invokers/{invoker_id}", status_code=204,
+            dependencies=[Depends(_require_admin_key)])
+def offboard_invoker(invoker_id: str, x_actor: str | None = Header(None)):
+    """Remove an invoker from CAPIF and the portal. Admin key required."""
     doc = _col.find_one({"invoker_id": invoker_id})
     if not doc:
         raise HTTPException(404, f"Invoker {invoker_id} not found")
@@ -471,9 +524,7 @@ def offboard_invoker(invoker_id: str):
         raise HTTPException(r.status_code, r.text)
 
     _col.delete_one({"invoker_id": invoker_id})
-    _audit_log("offboarded", invoker_id)
+    _audit_log("offboarded", invoker_id, actor=x_actor or "admin")
 
 
-# Mount admin router
-from admin_router import router as admin_router
 app.include_router(admin_router, prefix="/admin", tags=["Admin"])

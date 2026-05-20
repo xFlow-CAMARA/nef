@@ -40,3 +40,22 @@ def test_decrypt_fallback_still_rejects_real_ciphertext_corruption():
 def test_long_value_round_trip():
     pem = "-----BEGIN RSA PRIVATE KEY-----\n" + ("x" * 2048) + "\n-----END RSA PRIVATE KEY-----"
     assert decrypt(encrypt(pem)) == pem
+
+
+def test_rotated_key_makes_old_ciphertext_unreadable(monkeypatch):
+    """If an operator rotates FIELD_KEY, the *previously* stored ciphertext
+    must visibly fail to decrypt — never silently come back as garbage."""
+    import db
+    cipher = encrypt("legacy-value")
+
+    # Rotate: change passphrase + flush the lru_cache
+    monkeypatch.setenv("FIELD_KEY_PASSPHRASE", "rotated-" + "x" * 16)
+    db._fernet.cache_clear()
+    try:
+        with pytest.raises(InvalidToken):
+            decrypt(cipher)
+    finally:
+        # Restore so other tests run with the session-wide key.
+        monkeypatch.delenv("FIELD_KEY_PASSPHRASE", raising=False)
+        monkeypatch.setenv("FIELD_KEY_PASSPHRASE", "unit-test-key")
+        db._fernet.cache_clear()

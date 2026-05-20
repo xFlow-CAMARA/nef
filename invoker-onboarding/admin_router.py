@@ -53,18 +53,18 @@ router = APIRouter(dependencies=[Depends(_require_admin_key)])
 
 class ApproveRequest(BaseModel):
     scopes_approved: list[str]          # subset of CAMARA API names to grant
-    approved_by:     str = "admin"      # admin username or email
+    approved_by:     str                # admin username/email — injected by dashboard
     note:            str | None = None
 
 
 class RejectRequest(BaseModel):
     rejection_reason: str
-    rejected_by:      str = "admin"
+    rejected_by:      str               # injected by dashboard
 
 
 class RevokeRequest(BaseModel):
     reason:     str
-    revoked_by: str = "admin"
+    revoked_by: str                     # injected by dashboard
 
 
 class InvokerSummary(BaseModel):
@@ -222,16 +222,17 @@ def approve_invoker(invoker_id: str, req: ApproveRequest):
     )
     log.info("Invoker %s approved by %s  scopes=%s  acl=%s", invoker_id, req.approved_by, req.scopes_approved, acl_published)
 
+    # The secret is intentionally NOT returned here. Admins (or the
+    # developer) fetch it from GET /invokers/{id}/credentials, which
+    # records an audit row for every reveal so each disclosure leaves
+    # a trail. This keeps the credential out of the approve response
+    # body (and out of any access log that captures it).
     return {
         "invoker_id":         invoker_id,
         "approval_status":    "approved",
         "scopes_approved":    req.scopes_approved,
         "keycloak_client_id": kc["client_id"],
-        "keycloak_secret":    kc["client_secret"],
-        "message": (
-            f"Invoker approved. Share keycloak_client_id and keycloak_secret "
-            f"with the developer to obtain tokens via Keycloak."
-        ),
+        "message": "Invoker approved. Fetch credentials via GET /invokers/{id}/credentials.",
     }
 
 

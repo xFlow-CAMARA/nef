@@ -14,16 +14,25 @@ published API catalogue.
 
 import logging
 import os
+import time
 
 import httpx
 import redis
 
 log = logging.getLogger("invoker-onboarding.acl")
 
-CAPIF_REDIS_URL  = os.getenv("CAPIF_REDIS_URL", "redis://services-redis-1:6379/0")
+CAPIF_REDIS_URL   = os.getenv("CAPIF_REDIS_URL",   "redis://services-redis-1:6379/0")
 CAPIF_SERVICE_URL = os.getenv("CAPIF_SERVICE_URL", "http://capif-service:8080")
 
+# Shared pooled HTTP client (one per process). Closed on app shutdown.
+_http: httpx.Client = httpx.Client(timeout=5.0)
 _redis: redis.Redis | None = None
+
+# Catalog cache — the CAPIF API catalogue rarely changes between approvals,
+# so we cache it for `_CATALOG_TTL_S` seconds to avoid an HTTP round-trip on
+# every admin action.
+_CATALOG_TTL_S = float(os.getenv("CAPIF_CATALOG_TTL_S", "30"))
+_catalog_cache: tuple[float, dict[str, dict]] = (0.0, {})
 
 
 def _get_redis() -> redis.Redis:
@@ -33,31 +42,33 @@ def _get_redis() -> redis.Redis:
     return _redis
 
 
-def _catalog_map() -> dict[str, dict]:
-    """
-    Return a dict mapping api_name → {service_id, aef_id} from the
-    capif-service catalog endpoint.  Returns empty dict on failure.
-    """
+def _catalog_map(force: bool = False) -> dict[str, dict]:
+    """Return a dict mapping api_name → {service_id, aef_id}. Cached."""
+    global _catalog_cache
+    ts, cached = _catalog_cache
+    now = time.monotonic()
+    if not force and cached and (now - ts) < _CATALOG_TTL_S:
+        return cached
+
     try:
-        r = httpx.get(f"{CAPIF_SERVICE_URL}/catalog", timeout=5.0)
+        r = _http.get(f"{CAPIF_SERVICE_URL}/catalog")
         r.raise_for_status()
         entries = r.json()
-        return {
+        fresh = {
             e["api_name"]: {"service_id": e["service_id"], "aef_id": e["aef_id"]}
             for e in entries
             if "api_name" in e and "service_id" in e and "aef_id" in e
         }
+        _catalog_cache = (now, fresh)
+        return fresh
     except Exception as e:
         log.warning("Could not fetch CAPIF catalog: %s", e)
-        return {}
+        return cached or {}      # keep last good map on transient error
 
 
 def create_acl_entries(invoker_id: str, approved_scopes: list[str]) -> list[str]:
-    """
-    Publish create-acl events for every approved scope.
-
-    Returns the list of scope names for which an ACL event was published.
-    """
+    """Publish create-acl events for every approved scope.
+    Returns the list of scope names for which an ACL event was published."""
     catalog = _catalog_map()
     if not catalog:
         log.warning("Empty catalog — no ACL entries will be created for %s", invoker_id)
@@ -77,15 +88,11 @@ def create_acl_entries(invoker_id: str, approved_scopes: list[str]) -> list[str]
             published.append(scope)
         except Exception as e:
             log.error("Redis publish failed for %s/%s: %s", invoker_id, scope, e)
-
     return published
 
 
 def remove_acl_entries(invoker_id: str) -> None:
-    """
-    Publish a remove-acl event to remove ALL ACL entries for an invoker.
-    Uses the single-id form that triggers remove_invoker_acl() in the ACL service.
-    """
+    """Publish a remove-acl event removing all ACL entries for an invoker."""
     try:
         r = _get_redis()
         message = f"remove-acl:{invoker_id}"
