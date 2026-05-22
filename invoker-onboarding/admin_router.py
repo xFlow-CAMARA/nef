@@ -82,7 +82,10 @@ class RotateRequest(BaseModel):
     rotated_by: str                     # injected by dashboard
 
 
-ApprovalStatus = Literal["pending", "approved", "rejected", "suspended"]
+ApprovalStatus = Literal[
+    "pending", "approved", "rejected", "suspended",
+    "approving", "rotating",     # transient
+]
 
 
 class InvokerSummary(BaseModel):
@@ -132,7 +135,14 @@ def _doc_to_summary(doc: dict) -> InvokerSummary:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
-@router.get("/invokers", response_model=list[InvokerSummary])
+class InvokerList(BaseModel):
+    items:    list[InvokerSummary]
+    has_more: bool
+    skip:     int
+    limit:    int
+
+
+@router.get("/invokers", response_model=InvokerList)
 def list_invokers(
     status: str | None = Query(None, description="Filter by approval_status"),
     limit:  int        = Query(50, ge=1, le=500),
@@ -141,13 +151,16 @@ def list_invokers(
     """List registered invokers, newest first. Paginated to keep responses
     bounded for installations with many invokers."""
     query = {"approval_status": status} if status else {}
+    # Fetch one extra to detect a next page without a separate count query.
     docs = list(
         _col.find(query, ADMIN_PROJECTION)
             .sort("submitted_at", -1)
             .skip(skip)
-            .limit(limit)
+            .limit(limit + 1)
     )
-    return [_doc_to_summary(d) for d in docs]
+    has_more = len(docs) > limit
+    items = [_doc_to_summary(d) for d in docs[:limit]]
+    return InvokerList(items=items, has_more=has_more, skip=skip, limit=limit)
 
 
 @router.get("/invokers/{invoker_id}", response_model=InvokerDetail)
@@ -400,25 +413,83 @@ def rotate_invoker_secret(invoker_id: str, req: RotateRequest):
     invoker doc and returned ONCE in the response — fetch via /credentials
     afterwards (also audited).
     """
-    doc = _col.find_one({"invoker_id": invoker_id})
-    if not doc:
-        raise HTTPException(404, f"Invoker {invoker_id} not found")
-    if doc.get("approval_status") != "approved":
+    # Atomic claim against concurrent rotates. Transition approved → rotating
+    # in a single Mongo op; if two admins click Rotate at the same time, the
+    # second sees 409.
+    doc = _col.find_one_and_update(
+        {"invoker_id": invoker_id, "approval_status": "approved"},
+        {"$set": {"approval_status": "rotating"}},
+        return_document=pymongo.ReturnDocument.BEFORE,
+    )
+    if doc is None:
+        existing = _col.find_one({"invoker_id": invoker_id}, {"approval_status": 1})
+        if existing is None:
+            raise HTTPException(404, f"Invoker {invoker_id} not found")
+        if existing["approval_status"] == "rotating":
+            raise HTTPException(409, "Invoker is currently being rotated by another request")
         raise HTTPException(409, "Only approved invokers have a secret to rotate")
 
     kc_uuid = (doc.get("internal") or {}).get("keycloak_uuid")
     if not kc_uuid:
+        # Restore state so the admin doesn't get stuck in 'rotating'.
+        _col.update_one(
+            {"invoker_id": invoker_id, "approval_status": "rotating"},
+            {"$set": {"approval_status": "approved"}},
+        )
         raise HTTPException(500, "No Keycloak UUID stored — rotation impossible")
 
     try:
         new_secret = rotate_keycloak_client_secret(kc_uuid)
     except Exception as e:
         log.error("Keycloak rotate failed for %s: %s", invoker_id, e)
+        _col.update_one(
+            {"invoker_id": invoker_id, "approval_status": "rotating"},
+            {"$set": {"approval_status": "approved"}},
+        )
         raise HTTPException(502, "Keycloak rotation failed") from None
 
+    # If we can't persist the new secret to Mongo, Keycloak holds the new
+    # value but /credentials would hand the developer the OLD one. Try ONCE
+    # more to put the doc in a consistent state (re-rotate + re-store). If
+    # that fails too, mark the doc as inconsistent and audit loudly so an
+    # operator can fix it by hand via Keycloak admin.
+    try:
+        _col.update_one(
+            {"invoker_id": invoker_id},
+            {"$set": {"secrets.keycloak_secret": encrypt(new_secret)}},
+        )
+    except Exception as e1:
+        log.error("Mongo write failed after Keycloak rotate for %s: %s — re-rotating", invoker_id, e1)
+        try:
+            new_secret = rotate_keycloak_client_secret(kc_uuid)
+            _col.update_one(
+                {"invoker_id": invoker_id},
+                {"$set": {"secrets.keycloak_secret": encrypt(new_secret)}},
+            )
+        except Exception as e2:
+            log.error("Re-rotation also failed for %s: %s — marking inconsistent", invoker_id, e2)
+            try:
+                _col.update_one(
+                    {"invoker_id": invoker_id},
+                    {"$set": {"internal.rotation_inconsistent": True}},
+                )
+            except Exception:
+                pass
+            _audit_log(
+                "secret_rotation_inconsistent", invoker_id,
+                actor=req.rotated_by,
+                detail={"reason": req.reason, "error": str(e2)[:200]},
+            )
+            raise HTTPException(
+                503,
+                "Rotation failed — Keycloak and Mongo are out of sync; "
+                "regenerate the secret manually via Keycloak admin and update Mongo",
+            ) from None
+
+    # Release the transient 'rotating' state.
     _col.update_one(
-        {"invoker_id": invoker_id},
-        {"$set": {"secrets.keycloak_secret": encrypt(new_secret)}},
+        {"invoker_id": invoker_id, "approval_status": "rotating"},
+        {"$set": {"approval_status": "approved"}},
     )
     _audit_log(
         "secret_rotated", invoker_id,

@@ -111,8 +111,9 @@ def test_list_filter_by_status():
 
     r = client.get("/admin/invokers?status=approved")
     assert r.status_code == 200
-    rows = r.json()
-    assert {row["invoker_id"] for row in rows} == {"INV-list-1"}
+    body = r.json()
+    assert {row["invoker_id"] for row in body["items"]} == {"INV-list-1"}
+    assert body["has_more"] is False
 
 
 def test_audit_endpoint_returns_recent_events():

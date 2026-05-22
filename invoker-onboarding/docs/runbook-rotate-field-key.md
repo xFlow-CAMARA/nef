@@ -29,8 +29,9 @@ suspected leak, or as part of any incident response.
    enough; the script is idempotent but irrecoverable encryption mistakes
    beat any "should be safe" claim.
 
-4. **Run the migration.** From inside the project tree:
+4. **Dry-run the migration FIRST**, then commit:
    ```bash
+   # Dry run — prints what would change, writes nothing.
    docker run --rm --network xflow \
      -e MONGODB_URI=mongodb://camara-mongodb:27017/camara \
      -e OLD_FIELD_KEY_PASSPHRASE='current-passphrase' \
@@ -38,10 +39,16 @@ suspected leak, or as part of any incident response.
      -v $(pwd)/scripts:/work \
      -w /work python:3.11-slim \
      bash -c "pip install -q cryptography pymongo && python rotate-field-key.py"
+
+   # Same command + --apply commits the migration.
+   #   bash -c "pip install -q cryptography pymongo && python rotate-field-key.py --apply"
    ```
-   Expected output ends with `Done. total=N  migrated=N  already-new=0  failed=0`.
-   Any `failed>0` means at least one doc didn't decrypt under either key —
-   investigate before continuing.
+   Expected output ends with `{'total': N, 'migrated': N, 'already_new': 0, 'failed': 0}`.
+   Any `failed > 0` means at least one doc didn't decrypt under either key —
+   investigate before re-running with --apply. Writes happen in batches of 500.
+   The apply run inserts `field_key_rotated_started` and
+   `field_key_rotated_finished` rows into `audit_logs` so the event is
+   visible to anyone tailing the audit table.
 
 5. **Switch the service to the new key** and restart.
    ```bash

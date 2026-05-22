@@ -69,7 +69,12 @@ from db import (
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("invoker-onboarding")
 
-ApprovalStatus = Literal["pending", "approved", "rejected", "suspended"]
+ApprovalStatus = Literal[
+    "pending", "approved", "rejected", "suspended",
+    # Transient states held during multi-step external provisioning.
+    # Briefly visible in admin queries if a CAS-claimed mutation is in flight.
+    "approving", "rotating",
+]
 
 # Fail fast if APP_ENV=dev is paired with non-local upstreams.
 assert_dev_is_local()

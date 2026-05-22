@@ -36,4 +36,6 @@ def test_correct_key_succeeds(monkeypatch):
     monkeypatch.setenv("INVOKER_ADMIN_API_KEY", "expected")
     r = client.get("/admin/invokers", headers={"X-Admin-Api-Key": "expected"})
     assert r.status_code == 200
-    assert r.json() == []
+    body = r.json()
+    assert body["items"]    == []
+    assert body["has_more"] is False
