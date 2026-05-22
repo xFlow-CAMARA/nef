@@ -57,6 +57,9 @@ from db import (
     audit as _audit_log,
 )
 from db import (
+    audit_logs as _audit,
+)
+from db import (
     invokers as _col,
 )
 from db import (
@@ -440,12 +443,24 @@ def get_invoker_credentials(invoker_id: str, x_actor: str | None = Header(None))
             log.error("Could not decrypt stored secret for %s — key rotated?", invoker_id)
             raise HTTPException(503, "Stored credentials unreadable — contact operator") from None
 
+    # Look up the previous reveal (if any) BEFORE writing this one's audit row,
+    # so the response reflects "last time it was shown" — not the current call.
+    last_audit = _audit.find_one(
+        {"invoker_id": invoker_id, "action": "credentials_revealed"},
+        sort=[("timestamp", -1)],
+    )
+    previous_reveal = {
+        "at":    last_audit["timestamp"].isoformat() if last_audit else None,
+        "actor": last_audit["actor"]                 if last_audit else None,
+    } if last_audit else None
+
     _audit_log("credentials_revealed", invoker_id, actor=x_actor or "unknown")
 
     return {
         "keycloak_client_id": doc.get("keycloak_client_id"),
         "keycloak_secret":    secret,
         "scopes_approved":    doc.get("scopes_approved", []),
+        "previous_reveal":    previous_reveal,
     }
 
 
