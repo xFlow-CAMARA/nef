@@ -154,6 +154,28 @@ def create_keycloak_client(
     }
 
 
+def rotate_keycloak_client_secret(keycloak_uuid: str) -> str:
+    """Ask Keycloak to generate a new secret for an existing client.
+    Returns the new secret. Used when a developer loses their secret —
+    admin clicks 'Rotate' and the old secret stops working immediately.
+    """
+    admin_token = _admin_token()
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # POST .../client-secret tells Keycloak to regenerate; the response body
+    # is the new credential representation `{type: "secret", value: "..."}`.
+    r = _http.post(
+        f"{KEYCLOAK_URL}/admin/realms/{KEYCLOAK_REALM}/clients/{keycloak_uuid}/client-secret",
+        headers=headers,
+    )
+    r.raise_for_status()
+    new_secret = r.json().get("value", "")
+    if not new_secret:
+        raise RuntimeError("Keycloak rotated secret but returned no value")
+    log.info("Rotated Keycloak client secret for uuid=%s", keycloak_uuid)
+    return new_secret
+
+
 def delete_keycloak_client(keycloak_uuid: str) -> None:
     """Delete a Keycloak client by its internal UUID (on invoker revocation)."""
     try:

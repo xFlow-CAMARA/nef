@@ -39,7 +39,7 @@ from db import (
 from db import (
     now as _now,
 )
-from keycloak_bridge import create_keycloak_client, delete_keycloak_client
+from keycloak_bridge import create_keycloak_client, delete_keycloak_client, rotate_keycloak_client_secret
 
 log = logging.getLogger("invoker-onboarding.admin")
 
@@ -75,6 +75,11 @@ class RejectRequest(BaseModel):
 class RevokeRequest(BaseModel):
     reason:     str
     revoked_by: str                     # injected by dashboard
+
+
+class RotateRequest(BaseModel):
+    reason:     str | None = None
+    rotated_by: str                     # injected by dashboard
 
 
 ApprovalStatus = Literal["pending", "approved", "rejected", "suspended"]
@@ -383,6 +388,49 @@ def revoke_invoker(invoker_id: str, req: RevokeRequest):
         "invoker_id":      invoker_id,
         "approval_status": "suspended",
         "message": "Invoker suspended. Keycloak client deleted — active tokens will be rejected by Kong.",
+    }
+
+
+@router.post("/invokers/{invoker_id}/rotate-secret", status_code=200)
+def rotate_invoker_secret(invoker_id: str, req: RotateRequest):
+    """Generate a new Keycloak client secret for an approved invoker.
+
+    Used when the developer has lost their secret. The OLD secret stops
+    working immediately at Keycloak. The NEW secret is encrypted into the
+    invoker doc and returned ONCE in the response — fetch via /credentials
+    afterwards (also audited).
+    """
+    doc = _col.find_one({"invoker_id": invoker_id})
+    if not doc:
+        raise HTTPException(404, f"Invoker {invoker_id} not found")
+    if doc.get("approval_status") != "approved":
+        raise HTTPException(409, "Only approved invokers have a secret to rotate")
+
+    kc_uuid = (doc.get("internal") or {}).get("keycloak_uuid")
+    if not kc_uuid:
+        raise HTTPException(500, "No Keycloak UUID stored — rotation impossible")
+
+    try:
+        new_secret = rotate_keycloak_client_secret(kc_uuid)
+    except Exception as e:
+        log.error("Keycloak rotate failed for %s: %s", invoker_id, e)
+        raise HTTPException(502, "Keycloak rotation failed") from None
+
+    _col.update_one(
+        {"invoker_id": invoker_id},
+        {"$set": {"secrets.keycloak_secret": encrypt(new_secret)}},
+    )
+    _audit_log(
+        "secret_rotated", invoker_id,
+        actor=req.rotated_by,
+        detail={"reason": req.reason},
+    )
+    log.info("Rotated Keycloak secret for %s by %s", invoker_id, req.rotated_by)
+
+    return {
+        "invoker_id":        invoker_id,
+        "keycloak_secret":   new_secret,
+        "message": "Secret rotated. The previous secret no longer works.",
     }
 
 

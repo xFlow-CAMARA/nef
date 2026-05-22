@@ -170,6 +170,42 @@ def test_approve_rolls_back_keycloak_when_mongo_update_fails(monkeypatch):
     assert doc["approval_status"] == "pending"
 
 
+def test_rotate_secret_replaces_keycloak_secret_and_audits():
+    """Rotating swaps the encrypted secret in Mongo and logs a 'secret_rotated'
+    audit row. The OLD encrypted value must no longer be present."""
+    _seed_pending("INV-rot")
+    db.invokers.update_one(
+        {"invoker_id": "INV-rot"},
+        {"$set": {
+            "approval_status":         "approved",
+            "internal.keycloak_uuid":  "uuid-rot",
+            "secrets.keycloak_secret": db.encrypt("OLD-SECRET"),
+        }},
+    )
+    with patch("admin_router.rotate_keycloak_client_secret", return_value="NEW-SECRET"):
+        r = client.post("/admin/invokers/INV-rot/rotate-secret",
+                        json={"reason": "dev lost it", "rotated_by": "ops@x"})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["keycloak_secret"] == "NEW-SECRET"
+
+    doc = db.invokers.find_one({"invoker_id": "INV-rot"})
+    assert db.decrypt(doc["secrets"]["keycloak_secret"]) == "NEW-SECRET"
+
+    audit = db.audit_logs.find_one({"invoker_id": "INV-rot", "action": "secret_rotated"})
+    assert audit["actor"] == "ops@x"
+    assert audit["detail"]["reason"] == "dev lost it"
+
+
+def test_rotate_secret_only_works_on_approved():
+    """Pending or suspended invokers don't have a secret to rotate."""
+    _seed_pending("INV-rot-pending")
+    r = client.post("/admin/invokers/INV-rot-pending/rotate-secret",
+                    json={"rotated_by": "ops@x"})
+    assert r.status_code == 409
+
+
 def test_concurrent_approve_returns_409():
     """The CAS claim ensures only one approve attempt can proceed at a time."""
     _seed_pending("INV-conc")
